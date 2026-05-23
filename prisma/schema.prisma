@@ -1,0 +1,38 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Branch {
+  id        String    @id @default(uuid())
+  name      String
+  createdAt DateTime  @default(now())
+  services  Service[]
+}
+
+model Service {
+  id           String        @id @default(uuid())
+  name         String
+  branchId     String
+  branch       Branch        @relation(fields: [branchId], references: [id])
+  createdAt    DateTime      @default(now())
+  queueTickets QueueTicket[]
+}
+
+model QueueTicket {
+  id           String   @id @default(uuid())
+  customerName String
+  status       String
+  serviceId    String
+  service      Service  @relation(fields: [serviceId], references: [id])
+  createdAt    DateTime @default(now())
+}
