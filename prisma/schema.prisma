@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -12,27 +7,201 @@ datasource db {
   provider = "postgresql"
 }
 
+enum UserRole {
+  ADMIN
+  SUPERVISOR
+  BRANCH_MANAGER
+  OPERATOR
+  STAFF
+}
+
+enum QueueStatus {
+  OPEN
+  CLOSED
+  PAUSED
+}
+
+enum TicketStatus {
+  PENDING
+  WAITING
+  CALLED
+  SERVING
+  ON_HOLD
+  TRANSFERRED
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+  EXPIRED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         UserRole  @default(OPERATOR)
+  branchId     String?
+  branch       Branch?   @relation("UserBranch", fields: [branchId], references: [id])
+  isActive     Boolean   @default(true)
+  invitedAt    DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  calledTickets QueueTicket[] @relation("TicketOperator")
+}
+
 model Branch {
-  id        String    @id @default(uuid())
-  name      String
-  createdAt DateTime  @default(now())
-  services  Service[]
+  id               String    @id @default(uuid())
+  name             String
+  code             String    @unique
+  address          String?
+  timezone         String    @default("UTC")
+  operatingHours   Json?
+  maxQueueCapacity Int       @default(100)
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  services         Service[]
+  queues           Queue[]
+  users            User[]    @relation("UserBranch")
+  appointments     Appointment[]
+  analyticsSnapshots AnalyticsSnapshot[]
 }
 
 model Service {
-  id           String        @id @default(uuid())
-  name         String
-  branchId     String
-  branch       Branch        @relation(fields: [branchId], references: [id])
-  createdAt    DateTime      @default(now())
-  queueTickets QueueTicket[]
+  id                String   @id @default(uuid())
+  branchId          String
+  branch            Branch   @relation(fields: [branchId], references: [id])
+  name              String
+  code              String
+  description       String?
+  estimatedDuration Int      @default(10)
+  prefix            String   @default("A")
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  queues            Queue[]
+  appointments      Appointment[]
+  analyticsSnapshots AnalyticsSnapshot[]
+  @@unique([branchId, code])
+}
+
+model Queue {
+  id            String      @id @default(uuid())
+  branchId      String
+  branch        Branch      @relation(fields: [branchId], references: [id])
+  serviceId     String
+  service       Service     @relation(fields: [serviceId], references: [id])
+  date          DateTime    @default(now())
+  status        QueueStatus @default(OPEN)
+  currentNumber Int         @default(0)
+  prefix        String      @default("A")
+  openedAt      DateTime    @default(now())
+  closedAt      DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  tickets       QueueTicket[]
+}
+
+model Customer {
+  id         String   @id @default(uuid())
+  customerId String   @unique
+  phone      String?  @unique
+  name       String?
+  email      String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now()) @updatedAt
+  tickets    QueueTicket[]
+  appointments Appointment[]
 }
 
 model QueueTicket {
-  id           String   @id @default(uuid())
-  customerName String
-  status       String
+  id           String       @id @default(uuid())
+  queueId      String
+  queue        Queue        @relation(fields: [queueId], references: [id])
   serviceId    String
-  service      Service  @relation(fields: [serviceId], references: [id])
-  createdAt    DateTime @default(now())
+  branchId     String
+  ticketNumber String
+  status       TicketStatus @default(WAITING)
+  customerId   String?
+  customer     Customer?    @relation(fields: [customerId], references: [id])
+  operatorId   String?
+  operator     User?        @relation("TicketOperator", fields: [operatorId], references: [id])
+  priority     Int          @default(0)
+  notes        String?
+  counterNumber String?
+  issuedAt     DateTime     @default(now())
+  calledAt     DateTime?
+  servedAt     DateTime?
+  completedAt  DateTime?
+  waitSeconds  Int?
+  serviceSeconds Int?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  @@unique([queueId, ticketNumber])
+}
+
+model Appointment {
+  id          String            @id @default(uuid())
+  serviceId   String
+  service     Service           @relation(fields: [serviceId], references: [id])
+  branchId    String
+  branch      Branch            @relation(fields: [branchId], references: [id])
+  customerId  String?
+  customer    Customer?         @relation(fields: [customerId], references: [id])
+  scheduledAt DateTime
+  duration    Int               @default(30)
+  status      AppointmentStatus @default(PENDING)
+  notes       String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model Notification {
+  id          String   @id @default(uuid())
+  channel     String
+  recipientId String?
+  subject     String?
+  body        String
+  status      String   @default("PENDING")
+  sentAt      DateTime?
+  error       String?
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  timestamp  DateTime @default(now())
+}
+
+model AnalyticsSnapshot {
+  id             String   @id @default(uuid())
+  branchId       String
+  branch         Branch   @relation(fields: [branchId], references: [id])
+  serviceId      String
+  service        Service  @relation(fields: [serviceId], references: [id])
+  date           DateTime
+  hour           Int
+  avgWaitSeconds Int      @default(0)
+  ticketsServed  Int      @default(0)
+  ticketsNoShow  Int      @default(0)
+  p95WaitSeconds Int      @default(0)
+  createdAt      DateTime @default(now())
+  @@unique([branchId, serviceId, date, hour])
 }
