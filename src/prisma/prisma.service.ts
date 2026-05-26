@@ -1,12 +1,12 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaClient } from '../../generated/prisma/client.js';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 
 type PrismaInstance = InstanceType<typeof PrismaClient>;
 
 @Injectable()
 export class PrismaService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PrismaService.name);
   private _db!: PrismaInstance;
 
   get db(): PrismaInstance {
@@ -29,10 +29,12 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-    const adapter = new PrismaPg(pool);
-    this._db = new PrismaClient({ adapter } as any) as PrismaInstance;
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error('DATABASE_URL is not set');
+    const adapter = new PrismaPg({ connectionString: url });
+    this._db = new PrismaClient({ adapter }) as PrismaInstance;
     await this._db.$connect();
+    this.logger.log('Database connected');
   }
 
   async onModuleDestroy() {
