@@ -7,31 +7,50 @@ datasource db {
   provider = "postgresql"
 }
 
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum OrgStatus {
+  ACTIVE
+  SUSPENDED
+  OFFBOARDING
+}
+
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
 enum UserRole {
-  ADMIN
-  SUPERVISOR
+  SUPER_ADMIN
+  ORG_ADMIN
   BRANCH_MANAGER
-  OPERATOR
-  STAFF
+  SUPERVISOR
+  OFFICER
+  CUSTOMER
+}
+
+enum TicketStatus {
+  CREATED
+  WAITING
+  CALLED
+  IN_SERVICE
+  TRANSFERRED
+  ON_HOLD
+  AWAITING_PAYMENT
+  AWAITING_DOCUMENT
+  COMPLETED
+  REJECTED
+  CANCELLED
+  NO_SHOW
+  EXPIRED
+  ABANDONED
 }
 
 enum QueueStatus {
   OPEN
   CLOSED
   PAUSED
-}
-
-enum TicketStatus {
-  PENDING
-  WAITING
-  CALLED
-  SERVING
-  ON_HOLD
-  TRANSFERRED
-  COMPLETED
-  NO_SHOW
-  CANCELLED
-  EXPIRED
 }
 
 enum AppointmentStatus {
@@ -43,140 +62,452 @@ enum AppointmentStatus {
   NO_SHOW
 }
 
-model User {
-  id           String    @id @default(uuid())
-  email        String    @unique
-  passwordHash String
-  name         String
-  role         UserRole  @default(OPERATOR)
-  branchId     String?
-  branch       Branch?   @relation("UserBranch", fields: [branchId], references: [id])
-  isActive     Boolean   @default(true)
-  invitedAt    DateTime?
-  lastLoginAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  calledTickets QueueTicket[] @relation("TicketOperator")
+enum StepType {
+  SERVICE
+  PAYMENT
+  DOCUMENT_REVIEW
+  APPROVAL
+  VERIFICATION
+  CUSTOM
 }
+
+enum RequirementType {
+  TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+  MULTI_SELECT
+  IMAGE
+  DOCUMENT
+}
+
+enum FieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+  MULTI_SELECT
+  PHONE
+  EMAIL
+}
+
+enum ServiceType {
+  WALK_IN
+  APPOINTMENT
+  BOTH
+}
+
+enum TicketEventType {
+  CREATED
+  CALLED
+  SERVING_STARTED
+  TRANSFERRED
+  ON_HOLD
+  RESUMED
+  AWAITING_PAYMENT
+  AWAITING_DOCUMENT
+  COMPLETED
+  REJECTED
+  CANCELLED
+  NO_SHOW
+  EXPIRED
+  NOTE_ADDED
+  COUNTER_ASSIGNED
+  STEP_ADVANCED
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+  TELEGRAM
+  PUSH
+}
+
+// ─── Organization (Tenant Root) ───────────────────────────────────────────────
+
+model Organization {
+  id        String    @id @default(uuid())
+  name      String
+  code      String    @unique
+  logo      String?
+  status    OrgStatus @default(ACTIVE)
+  settings  Json?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  branches           Branch[]
+  users              User[]
+  customers          Customer[]
+  workflows          Workflow[]
+  counterGroups      CounterGroup[]
+  tickets            Ticket[]
+  appointments       Appointment[]
+  analyticsSnapshots AnalyticsSnapshot[]
+}
+
+// ─── Branch ───────────────────────────────────────────────────────────────────
 
 model Branch {
-  id               String    @id @default(uuid())
-  name             String
-  code             String    @unique
-  address          String?
-  timezone         String    @default("UTC")
-  operatingHours   Json?
-  maxQueueCapacity Int       @default(100)
-  isActive         Boolean   @default(true)
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  services         Service[]
-  queues           Queue[]
-  users            User[]    @relation("UserBranch")
-  appointments     Appointment[]
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  code           String
+  address        String?
+  latitude       Float?
+  longitude      Float?
+  timezone       String       @default("UTC")
+  operatingHours Json?
+  maxCapacity    Int          @default(100)
+  status         BranchStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  services           Service[]
+  counters           Counter[]
+  users              User[]             @relation("UserBranch")
+  queues             Queue[]
+  tickets            Ticket[]
+  appointments       Appointment[]
   analyticsSnapshots AnalyticsSnapshot[]
+
+  @@unique([organizationId, code])
 }
 
-model Service {
-  id                String   @id @default(uuid())
-  branchId          String
-  branch            Branch   @relation(fields: [branchId], references: [id])
-  name              String
-  code              String
-  description       String?
-  estimatedDuration Int      @default(10)
-  prefix            String   @default("A")
-  isActive          Boolean  @default(true)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  queues            Queue[]
-  appointments      Appointment[]
-  analyticsSnapshots AnalyticsSnapshot[]
+// ─── Workflow ─────────────────────────────────────────────────────────────────
+
+model Workflow {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  steps    WorkflowStep[]
+  services Service[]
+}
+
+model WorkflowStep {
+  id             String        @id @default(uuid())
+  workflowId     String
+  workflow       Workflow      @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  name           String
+  stepType       StepType      @default(SERVICE)
+  order          Int
+  slaMinutes     Int?
+  counterGroupId String?
+  counterGroup   CounterGroup? @relation(fields: [counterGroupId], references: [id])
+  isInitial      Boolean       @default(false)
+  isFinal        Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  transitionsFrom WorkflowTransition[] @relation("TransitionSource")
+  transitionsTo   WorkflowTransition[] @relation("TransitionDest")
+  queues          Queue[]
+  currentTickets  Ticket[]             @relation("CurrentStep")
+}
+
+model WorkflowTransition {
+  id                String       @id @default(uuid())
+  workflowId        String
+  sourceStepId      String
+  sourceStep        WorkflowStep @relation("TransitionSource", fields: [sourceStepId], references: [id], onDelete: Cascade)
+  destinationStepId String
+  destinationStep   WorkflowStep @relation("TransitionDest", fields: [destinationStepId], references: [id])
+  condition         Json?
+  label             String?
+  order             Int          @default(0)
+  createdAt         DateTime     @default(now())
+}
+
+// ─── Counter ──────────────────────────────────────────────────────────────────
+
+model CounterGroup {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  counters      Counter[]
+  workflowSteps WorkflowStep[]
+}
+
+model Counter {
+  id        String        @id @default(uuid())
+  branchId  String
+  branch    Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  groupId   String?
+  group     CounterGroup? @relation(fields: [groupId], references: [id])
+  name      String
+  code      String
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  currentTickets Ticket[] @relation("CurrentCounter")
+
   @@unique([branchId, code])
 }
 
-model Queue {
-  id            String      @id @default(uuid())
-  branchId      String
-  branch        Branch      @relation(fields: [branchId], references: [id])
-  serviceId     String
-  service       Service     @relation(fields: [serviceId], references: [id])
-  date          DateTime    @default(now())
-  status        QueueStatus @default(OPEN)
-  currentNumber Int         @default(0)
-  prefix        String      @default("A")
-  openedAt      DateTime    @default(now())
-  closedAt      DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  tickets       QueueTicket[]
+// ─── Service ──────────────────────────────────────────────────────────────────
+
+model Service {
+  id                String      @id @default(uuid())
+  branchId          String
+  branch            Branch      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  workflowId        String?
+  workflow          Workflow?   @relation(fields: [workflowId], references: [id])
+  name              String
+  code              String
+  description       String?
+  estimatedDuration Int         @default(10)
+  prefix            String      @default("A")
+  serviceType       ServiceType @default(WALK_IN)
+  isActive          Boolean     @default(true)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  requirements       Requirement[]
+  forms              Form[]
+  queues             Queue[]
+  tickets            Ticket[]
+  appointments       Appointment[]
+  analyticsSnapshots AnalyticsSnapshot[]
+
+  @@unique([branchId, code])
 }
 
+// ─── Requirements ─────────────────────────────────────────────────────────────
+
+model Requirement {
+  id              String          @id @default(uuid())
+  serviceId       String
+  service         Service         @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  name            String
+  type            RequirementType
+  required        Boolean         @default(true)
+  validationRules Json?
+  order           Int             @default(0)
+  createdAt       DateTime        @default(now())
+}
+
+// ─── Dynamic Forms ────────────────────────────────────────────────────────────
+
+model Form {
+  id        String      @id @default(uuid())
+  serviceId String
+  service   Service     @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  name      String
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  fields FormField[]
+}
+
+model FormField {
+  id         String    @id @default(uuid())
+  formId     String
+  form       Form      @relation(fields: [formId], references: [id], onDelete: Cascade)
+  label      String
+  fieldKey   String
+  fieldType  FieldType
+  required   Boolean   @default(false)
+  options    Json?
+  conditions Json?
+  order      Int       @default(0)
+  createdAt  DateTime  @default(now())
+}
+
+// ─── User (Staff / Admin — dual auth) ────────────────────────────────────────
+
+model User {
+  id             String        @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  branchId       String?
+  branch         Branch?       @relation("UserBranch", fields: [branchId], references: [id])
+
+  email            String?  @unique
+  passwordHash     String?
+  telegramId       String?  @unique
+  telegramUsername String?
+
+  firstName   String?
+  lastName    String?
+  name        String?
+  role        UserRole  @default(OFFICER)
+  isActive    Boolean   @default(true)
+  invitedAt   DateTime?
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  operatedTickets Ticket[]     @relation("TicketOperator")
+  ticketEvents    TicketEvent[]
+}
+
+// ─── Customer (Telegram-primary) ─────────────────────────────────────────────
+
 model Customer {
-  id         String   @id @default(uuid())
-  customerId String   @unique
-  phone      String?  @unique
-  name       String?
-  email      String?
-  createdAt  DateTime @default(now())
-  lastSeenAt DateTime @default(now()) @updatedAt
-  tickets    QueueTicket[]
+  id             String        @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  telegramId       String?  @unique
+  telegramUsername String?
+  photoUrl         String?
+
+  phone           String?  @unique
+  email           String?
+  firstName       String
+  lastName        String?
+  profileComplete Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets      Ticket[]
   appointments Appointment[]
 }
 
-model QueueTicket {
-  id           String       @id @default(uuid())
-  queueId      String
-  queue        Queue        @relation(fields: [queueId], references: [id])
-  serviceId    String
-  branchId     String
-  ticketNumber String
-  status       TicketStatus @default(WAITING)
-  customerId   String?
-  customer     Customer?    @relation(fields: [customerId], references: [id])
-  operatorId   String?
-  operator     User?        @relation("TicketOperator", fields: [operatorId], references: [id])
-  priority     Int          @default(0)
-  notes        String?
-  counterNumber String?
-  issuedAt     DateTime     @default(now())
-  calledAt     DateTime?
-  servedAt     DateTime?
-  completedAt  DateTime?
-  waitSeconds  Int?
-  serviceSeconds Int?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  @@unique([queueId, ticketNumber])
+// ─── Queue ────────────────────────────────────────────────────────────────────
+
+model Queue {
+  id            String        @id @default(uuid())
+  branchId      String
+  branch        Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  serviceId     String
+  service       Service       @relation(fields: [serviceId], references: [id])
+  stepId        String?
+  step          WorkflowStep? @relation(fields: [stepId], references: [id])
+  date          DateTime      @default(now())
+  status        QueueStatus   @default(OPEN)
+  currentNumber Int           @default(0)
+  prefix        String        @default("A")
+  openedAt      DateTime      @default(now())
+  closedAt      DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 }
 
+// ─── Ticket ───────────────────────────────────────────────────────────────────
+
+model Ticket {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  branchId       String
+  branch         Branch       @relation(fields: [branchId], references: [id])
+  serviceId      String
+  service        Service      @relation(fields: [serviceId], references: [id])
+  customerId     String?
+  customer       Customer?    @relation(fields: [customerId], references: [id])
+
+  queueNumber String
+  prefix      String @default("A")
+
+  workflowId       String?
+  currentStepId    String?
+  currentStep      WorkflowStep? @relation("CurrentStep", fields: [currentStepId], references: [id])
+  currentCounterId String?
+  currentCounter   Counter?      @relation("CurrentCounter", fields: [currentCounterId], references: [id])
+  operatorId       String?
+  operator         User?         @relation("TicketOperator", fields: [operatorId], references: [id])
+
+  status        TicketStatus @default(CREATED)
+  priority      Int          @default(0)
+  notes         String?
+  formData      Json?
+
+  issuedAt      DateTime  @default(now())
+  calledAt      DateTime?
+  servedAt      DateTime?
+  completedAt   DateTime?
+  waitSeconds   Int?
+  serviceSeconds Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events TicketEvent[]
+
+  @@index([branchId, status])
+  @@index([organizationId, createdAt])
+  @@index([customerId])
+}
+
+// ─── Ticket Event (Audit Trail) ───────────────────────────────────────────────
+
+model TicketEvent {
+  id        String          @id @default(uuid())
+  ticketId  String
+  ticket    Ticket          @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  eventType TicketEventType
+  actorId   String?
+  actor     User?           @relation(fields: [actorId], references: [id])
+
+  fromStatus TicketStatus?
+  toStatus   TicketStatus?
+  fromStepId String?
+  toStepId   String?
+  counterId  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+}
+
+// ─── Appointment ──────────────────────────────────────────────────────────────
+
 model Appointment {
-  id          String            @id @default(uuid())
-  serviceId   String
-  service     Service           @relation(fields: [serviceId], references: [id])
-  branchId    String
-  branch      Branch            @relation(fields: [branchId], references: [id])
-  customerId  String?
-  customer    Customer?         @relation(fields: [customerId], references: [id])
+  id             String            @id @default(uuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id])
+  branchId       String
+  branch         Branch            @relation(fields: [branchId], references: [id])
+  serviceId      String
+  service        Service           @relation(fields: [serviceId], references: [id])
+  customerId     String?
+  customer       Customer?         @relation(fields: [customerId], references: [id])
+
   scheduledAt DateTime
   duration    Int               @default(30)
   status      AppointmentStatus @default(PENDING)
   notes       String?
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  ticketId    String?
+
+  reminderSentAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([branchId, scheduledAt])
+  @@index([customerId])
 }
 
+// ─── Notification ─────────────────────────────────────────────────────────────
+
 model Notification {
-  id          String   @id @default(uuid())
-  channel     String
+  id          String              @id @default(uuid())
+  channel     NotificationChannel
   recipientId String?
   subject     String?
   body        String
-  status      String   @default("PENDING")
+  status      String              @default("PENDING")
+  metadata    Json?
   sentAt      DateTime?
   error       String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime            @default(now())
 }
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
 
 model AuditLog {
   id         String   @id @default(uuid())
@@ -188,20 +519,29 @@ model AuditLog {
   after      Json?
   ip         String?
   timestamp  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
 }
 
+// ─── Analytics ────────────────────────────────────────────────────────────────
+
 model AnalyticsSnapshot {
-  id             String   @id @default(uuid())
-  branchId       String
-  branch         Branch   @relation(fields: [branchId], references: [id])
-  serviceId      String
-  service        Service  @relation(fields: [serviceId], references: [id])
-  date           DateTime
-  hour           Int
-  avgWaitSeconds Int      @default(0)
-  ticketsServed  Int      @default(0)
-  ticketsNoShow  Int      @default(0)
-  p95WaitSeconds Int      @default(0)
-  createdAt      DateTime @default(now())
+  id              String       @id @default(uuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  branchId        String
+  branch          Branch       @relation(fields: [branchId], references: [id])
+  serviceId       String
+  service         Service      @relation(fields: [serviceId], references: [id])
+  date            DateTime
+  hour            Int
+  avgWaitSeconds  Int          @default(0)
+  ticketsServed   Int          @default(0)
+  ticketsNoShow   Int          @default(0)
+  ticketsRejected Int          @default(0)
+  p95WaitSeconds  Int          @default(0)
+  createdAt       DateTime     @default(now())
+
   @@unique([branchId, serviceId, date, hour])
 }

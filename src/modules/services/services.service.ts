@@ -5,10 +5,17 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 export class ServicesService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(branchId?: string) {
+  async findAll(filter: { branchId?: string; organizationId?: string }) {
     return this.prisma.service.findMany({
-      where: branchId ? { branchId } : undefined,
-      include: { branch: { select: { id: true, name: true } }, _count: { select: { queues: true } } },
+      where: {
+        ...(filter.branchId ? { branchId: filter.branchId } : {}),
+        ...(filter.organizationId ? { branch: { organizationId: filter.organizationId } } : {}),
+      },
+      include: {
+        branch: { select: { id: true, name: true } },
+        workflow: { select: { id: true, name: true } },
+        _count: { select: { queues: true, requirements: true } },
+      },
       orderBy: { name: 'asc' },
     });
   }
@@ -16,26 +23,30 @@ export class ServicesService {
   async findOne(id: string) {
     const svc = await this.prisma.service.findUnique({
       where: { id },
-      include: { branch: true },
+      include: {
+        branch: { select: { id: true, name: true } },
+        workflow: { include: { steps: { orderBy: { order: 'asc' } } } },
+        requirements: { orderBy: { order: 'asc' } },
+        forms: { where: { isActive: true }, include: { fields: { orderBy: { order: 'asc' } } } },
+      },
     });
     if (!svc) throw new NotFoundException('Service not found');
     return svc;
   }
 
-  async create(dto: { branchId: string; name: string; code: string; description?: string; estimatedDuration?: number; prefix?: string }) {
-    const exists = await this.prisma.service.findUnique({ where: { branchId_code: { branchId: dto.branchId, code: dto.code } } });
+  async create(dto: { branchId: string; name: string; code: string; description?: string; estimatedDuration?: number; prefix?: string; workflowId?: string; serviceType?: string }) {
+    const exists = await this.prisma.service.findUnique({ where: { branchId_code: { branchId: dto.branchId, code: dto.code.toUpperCase() } } });
     if (exists) throw new ConflictException(`Service code '${dto.code}' already exists in this branch`);
-    return this.prisma.service.create({ data: dto });
+    return this.prisma.service.create({ data: { ...dto, code: dto.code.toUpperCase() } as any });
   }
 
-  async update(id: string, dto: { name?: string; description?: string; estimatedDuration?: number; prefix?: string; isActive?: boolean }) {
+  async update(id: string, dto: { name?: string; description?: string; estimatedDuration?: number; prefix?: string; isActive?: boolean; workflowId?: string; serviceType?: string }) {
     await this.findOne(id);
-    return this.prisma.service.update({ where: { id }, data: dto });
+    return this.prisma.service.update({ where: { id }, data: dto as any });
   }
 
   async remove(id: string) {
     await this.findOne(id);
-    await this.prisma.service.update({ where: { id }, data: { isActive: false } });
-    return { success: true };
+    return this.prisma.service.update({ where: { id }, data: { isActive: false } });
   }
 }

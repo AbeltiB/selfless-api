@@ -5,6 +5,7 @@ import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
 import { JwtStrategy } from './jwt.strategy.js';
 import { LocalStrategy } from './local.strategy.js';
+import { TelegramStrategy } from './telegram.strategy.js';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { LocalStrategy } from './local.strategy.js';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, LocalStrategy],
+  providers: [AuthService, JwtStrategy, LocalStrategy, TelegramStrategy],
   exports: [AuthService],
 })
 export class AuthModule {}

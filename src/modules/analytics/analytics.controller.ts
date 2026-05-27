@@ -9,18 +9,21 @@ export class AnalyticsController {
   @Get('dashboard')
   async dashboardMe(@CurrentUser() user: any, @Query('days') days?: string) {
     const branchId = user?.branchId || '';
-    if (!branchId) return { success: true, data: { totalTickets: 0, completedTickets: 0, noShowTickets: 0, cancelledTickets: 0, completionRate: 0, avgWaitSeconds: 0 } };
-    return { success: true, data: await this.analyticsService.getDashboard(branchId, days ? Number(days) : 7) };
+    const organizationId = user?.organizationId;
+    if (!branchId && !organizationId) {
+      return { success: true, data: { totalTickets: 0, completedTickets: 0, noShowTickets: 0, cancelledTickets: 0, completionRate: 0, avgWaitSeconds: 0 } };
+    }
+    return { success: true, data: await this.analyticsService.getDashboard(branchId, organizationId, days ? Number(days) : 7) };
   }
 
   @Get('dashboard/:branchId')
-  async dashboard(@Param('branchId') branchId: string, @Query('days') days?: string) {
-    return { success: true, data: await this.analyticsService.getDashboard(branchId, days ? Number(days) : 7) };
+  async dashboard(@Param('branchId') branchId: string, @Query('organizationId') organizationId?: string, @Query('days') days?: string) {
+    return { success: true, data: await this.analyticsService.getDashboard(branchId, organizationId, days ? Number(days) : 7) };
   }
 
   @Get('services/:branchId')
-  async services(@Param('branchId') branchId: string, @Query('days') days?: string) {
-    return { success: true, data: await this.analyticsService.getServiceBreakdown(branchId, days ? Number(days) : 7) };
+  async services(@Param('branchId') branchId: string, @Query('organizationId') organizationId?: string, @Query('days') days?: string) {
+    return { success: true, data: await this.analyticsService.getServiceBreakdown(branchId, organizationId, days ? Number(days) : 7) };
   }
 
   @Get('hourly/:branchId')
@@ -29,7 +32,7 @@ export class AnalyticsController {
   }
 
   @Get('snapshots/:branchId')
-  async snapshots(@Param('branchId') branchId: string, @Query('serviceId') serviceId?: string, @Query('days') days?: string) {
-    return { success: true, data: await this.analyticsService.getSnapshots(branchId, serviceId, days ? Number(days) : 30) };
+  async snapshots(@Param('branchId') branchId: string, @Query('serviceId') serviceId?: string, @Query('organizationId') organizationId?: string, @Query('days') days?: string) {
+    return { success: true, data: await this.analyticsService.getSnapshots(branchId, serviceId, organizationId, days ? Number(days) : 30) };
   }
 }

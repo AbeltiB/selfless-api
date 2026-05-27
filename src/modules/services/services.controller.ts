@@ -5,33 +5,23 @@ import { UserRole } from 'selfless-sdk';
 
 @Controller('services')
 export class ServicesController {
-  constructor(private servicesService: ServicesService) {}
+  constructor(private svc: ServicesService) {}
 
   @Get()
-  async findAll(@Query('branchId') branchId?: string) {
-    return { success: true, data: await this.servicesService.findAll(branchId) };
-  }
+  findAll(@Query() q: any) { return this.svc.findAll(q); }
 
   @Get(':id')
-  async findOne(@Param('id') id: string) {
-    return { success: true, data: await this.servicesService.findOne(id) };
-  }
+  findOne(@Param('id') id: string) { return this.svc.findOne(id); }
 
   @Post()
-  @Roles(UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.BRANCH_MANAGER)
-  async create(@Body() body: any) {
-    return { success: true, data: await this.servicesService.create(body) };
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
+  create(@Body() body: any) { return this.svc.create(body); }
 
   @Patch(':id')
-  @Roles(UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.BRANCH_MANAGER)
-  async update(@Param('id') id: string, @Body() body: any) {
-    return { success: true, data: await this.servicesService.update(id, body) };
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
+  update(@Param('id') id: string, @Body() body: any) { return this.svc.update(id, body); }
 
   @Delete(':id')
-  @Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
-  async remove(@Param('id') id: string) {
-    return this.servicesService.remove(id);
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
+  remove(@Param('id') id: string) { return this.svc.remove(id); }
 }

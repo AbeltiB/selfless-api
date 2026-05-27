@@ -4,13 +4,13 @@ import { Roles } from '../../common/decorators/roles.decorator.js';
 import { UserRole } from 'selfless-sdk';
 
 @Controller('users')
-@Roles(UserRole.ADMIN, UserRole.SUPERVISOR)
+@Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
 export class UsersController {
   constructor(private usersService: UsersService) {}
 
   @Get()
-  async findAll(@Query('branchId') branchId?: string) {
-    return { success: true, data: await this.usersService.findAll(branchId) };
+  async findAll(@Query('branchId') branchId?: string, @Query('organizationId') organizationId?: string) {
+    return { success: true, data: await this.usersService.findAll({ branchId, organizationId }) };
   }
 
   @Get(':id')
@@ -19,7 +19,7 @@ export class UsersController {
   }
 
   @Post()
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
   async create(@Body() body: any) {
     return { success: true, data: await this.usersService.create(body) };
   }
@@ -30,7 +30,7 @@ export class UsersController {
   }
 
   @Delete(':id')
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
   async remove(@Param('id') id: string) {
     return this.usersService.remove(id);
   }

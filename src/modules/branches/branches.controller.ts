@@ -1,37 +1,27 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, Query } from '@nestjs/common';
 import { BranchesService } from './branches.service.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
 import { UserRole } from 'selfless-sdk';
 
 @Controller('branches')
 export class BranchesController {
-  constructor(private branchesService: BranchesService) {}
+  constructor(private svc: BranchesService) {}
 
   @Get()
-  async findAll() {
-    return { success: true, data: await this.branchesService.findAll() };
-  }
+  findAll(@Query('organizationId') orgId?: string) { return this.svc.findAll(orgId); }
 
   @Get(':id')
-  async findOne(@Param('id') id: string) {
-    return { success: true, data: await this.branchesService.findOne(id) };
-  }
+  findOne(@Param('id') id: string) { return this.svc.findOne(id); }
 
   @Post()
-  @Roles(UserRole.ADMIN)
-  async create(@Body() body: any) {
-    return { success: true, data: await this.branchesService.create(body) };
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
+  create(@Body() body: any) { return this.svc.create(body); }
 
   @Patch(':id')
-  @Roles(UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.BRANCH_MANAGER)
-  async update(@Param('id') id: string, @Body() body: any) {
-    return { success: true, data: await this.branchesService.update(id, body) };
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
+  update(@Param('id') id: string, @Body() body: any) { return this.svc.update(id, body); }
 
   @Delete(':id')
-  @Roles(UserRole.ADMIN)
-  async remove(@Param('id') id: string) {
-    return this.branchesService.remove(id);
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
+  remove(@Param('id') id: string) { return this.svc.remove(id); }
 }

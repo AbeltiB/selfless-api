@@ -7,10 +7,13 @@ import { UserRole } from 'selfless-sdk';
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(branchId?: string) {
+  async findAll(filter?: { branchId?: string; organizationId?: string }) {
     return this.prisma.user.findMany({
-      where: branchId ? { branchId } : undefined,
-      select: { id: true, email: true, name: true, role: true, branchId: true, isActive: true, createdAt: true, lastLoginAt: true },
+      where: {
+        ...(filter?.branchId ? { branchId: filter.branchId } : {}),
+        ...(filter?.organizationId ? { organizationId: filter.organizationId } : {}),
+      },
+      select: { id: true, email: true, name: true, role: true, branchId: true, organizationId: true, isActive: true, createdAt: true, lastLoginAt: true },
     });
   }
 
@@ -24,12 +27,12 @@ export class UsersService {
     return safe;
   }
 
-  async create(dto: { email: string; password: string; name: string; role?: UserRole; branchId?: string }) {
+  async create(dto: { email: string; password: string; name: string; role?: UserRole; branchId?: string; organizationId?: string }) {
     const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
     if (exists) throw new ConflictException('Email already in use');
     const passwordHash = await bcrypt.hash(dto.password, 12);
     const user = await this.prisma.user.create({
-      data: { email: dto.email, passwordHash, name: dto.name, role: dto.role || UserRole.OPERATOR, branchId: dto.branchId },
+      data: { email: dto.email, passwordHash, name: dto.name, role: dto.role || UserRole.OFFICER, branchId: dto.branchId, organizationId: dto.organizationId },
     });
     const { passwordHash: _, ...safe } = user;
     return safe;

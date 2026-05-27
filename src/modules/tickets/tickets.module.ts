@@ -1,9 +1,14 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TicketsController } from './tickets.controller.js';
-import { QueuesModule } from '../queues/queues.module.js';
+import { TicketsService } from './tickets.service.js';
+import { NotificationsModule } from '../notifications/notifications.module.js';
+import { RealtimeModule } from '../realtime/realtime.module.js';
+import { WorkflowsModule } from '../workflows/workflows.module.js';
 
 @Module({
-  imports: [QueuesModule],
+  imports: [NotificationsModule, RealtimeModule, WorkflowsModule],
   controllers: [TicketsController],
+  providers: [TicketsService],
+  exports: [TicketsService],
 })
 export class TicketsModule {}

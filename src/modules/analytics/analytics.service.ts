@@ -6,18 +6,24 @@ import { TicketStatus } from 'selfless-sdk';
 export class AnalyticsService {
   constructor(private prisma: PrismaService) {}
 
-  async getDashboard(branchId: string, days = 7) {
+  async getDashboard(branchId: string, organizationId?: string, days = 7) {
     const from = new Date();
     from.setDate(from.getDate() - days);
     from.setHours(0, 0, 0, 0);
 
+    const baseWhere = {
+      ...(branchId ? { branchId } : {}),
+      ...(organizationId ? { organizationId } : {}),
+      createdAt: { gte: from },
+    };
+
     const [totalTickets, completedTickets, noShowTickets, cancelledTickets, avgWait] = await Promise.all([
-      this.prisma.queueTicket.count({ where: { branchId, createdAt: { gte: from } } }),
-      this.prisma.queueTicket.count({ where: { branchId, status: TicketStatus.COMPLETED, createdAt: { gte: from } } }),
-      this.prisma.queueTicket.count({ where: { branchId, status: TicketStatus.NO_SHOW, createdAt: { gte: from } } }),
-      this.prisma.queueTicket.count({ where: { branchId, status: TicketStatus.CANCELLED, createdAt: { gte: from } } }),
-      this.prisma.queueTicket.aggregate({
-        where: { branchId, status: TicketStatus.COMPLETED, waitSeconds: { not: null }, createdAt: { gte: from } },
+      this.prisma.ticket.count({ where: baseWhere }),
+      this.prisma.ticket.count({ where: { ...baseWhere, status: TicketStatus.COMPLETED } }),
+      this.prisma.ticket.count({ where: { ...baseWhere, status: TicketStatus.NO_SHOW } }),
+      this.prisma.ticket.count({ where: { ...baseWhere, status: TicketStatus.CANCELLED } }),
+      this.prisma.ticket.aggregate({
+        where: { ...baseWhere, status: TicketStatus.COMPLETED, waitSeconds: { not: null } },
         _avg: { waitSeconds: true },
       }),
     ]);
@@ -32,13 +38,17 @@ export class AnalyticsService {
     };
   }
 
-  async getServiceBreakdown(branchId: string, days = 7) {
+  async getServiceBreakdown(branchId: string, organizationId?: string, days = 7) {
     const from = new Date();
     from.setDate(from.getDate() - days);
 
-    return this.prisma.queueTicket.groupBy({
+    return this.prisma.ticket.groupBy({
       by: ['serviceId'],
-      where: { branchId, createdAt: { gte: from } },
+      where: {
+        ...(branchId ? { branchId } : {}),
+        ...(organizationId ? { organizationId } : {}),
+        createdAt: { gte: from },
+      },
       _count: { id: true },
       _avg: { waitSeconds: true },
     });
@@ -49,7 +59,7 @@ export class AnalyticsService {
     const start = new Date(d.setHours(0, 0, 0, 0));
     const end = new Date(d.setHours(24, 0, 0, 0));
 
-    const tickets = await this.prisma.queueTicket.findMany({
+    const tickets = await this.prisma.ticket.findMany({
       where: { branchId, createdAt: { gte: start, lt: end } },
       select: { createdAt: true, status: true },
     });
@@ -64,11 +74,16 @@ export class AnalyticsService {
     return hourly;
   }
 
-  async getSnapshots(branchId: string, serviceId?: string, days = 30) {
+  async getSnapshots(branchId: string, serviceId?: string, organizationId?: string, days = 30) {
     const from = new Date();
     from.setDate(from.getDate() - days);
     return this.prisma.analyticsSnapshot.findMany({
-      where: { branchId, ...(serviceId ? { serviceId } : {}), date: { gte: from } },
+      where: {
+        ...(branchId ? { branchId } : {}),
+        ...(serviceId ? { serviceId } : {}),
+        ...(organizationId ? { organizationId } : {}),
+        date: { gte: from },
+      },
       orderBy: [{ date: 'asc' }, { hour: 'asc' }],
     });
   }

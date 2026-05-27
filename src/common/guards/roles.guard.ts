@@ -17,6 +17,11 @@ export class RolesGuard implements CanActivate {
     const { user } = context.switchToHttp().getRequest();
     if (!user) return false;
 
+    // Customers authenticated via Telegram have no staff role — block role-restricted endpoints
+    if (user.type === 'customer') {
+      throw new ForbiddenException('Staff access required');
+    }
+
     if (!requiredRoles.includes(user.role)) {
       throw new ForbiddenException(`Requires one of: ${requiredRoles.join(', ')}`);
     }

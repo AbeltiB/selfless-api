@@ -1,41 +1,42 @@
-import { Controller, Get, Patch, Body, Param, Query } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service.js';
-import { QueuesService } from '../queues/queues.service.js';
+import { Controller, Get, Post, Patch, Body, Param, Query } from '@nestjs/common';
+import { TicketsService } from './tickets.service.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
-import { UserRole, TicketStatus } from 'selfless-sdk';
+import { UserRole } from 'selfless-sdk';
 
 @Controller('tickets')
 export class TicketsController {
-  constructor(
-    private prisma: PrismaService,
-    private queuesService: QueuesService,
-  ) {}
+  constructor(private svc: TicketsService) {}
 
   @Get()
-  async findAll(@Query('limit') limit?: string, @Query('branchId') branchId?: string) {
-    const take = limit ? Math.min(Number(limit), 100) : 20;
-    const tickets = await this.prisma.queueTicket.findMany({
-      where: branchId ? { branchId } : undefined,
-      take,
-      orderBy: { createdAt: 'desc' },
-      include: { customer: true, operator: { select: { id: true, name: true } } },
-    });
-    return { success: true, data: tickets };
-  }
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER, UserRole.SUPERVISOR, UserRole.OFFICER)
+  findAll(@Query() query: any) { return this.svc.findAll(query); }
 
   @Get(':id')
-  async findOne(@Param('id') id: string) {
-    const ticket = await this.prisma.queueTicket.findUnique({
-      where: { id },
-      include: { customer: true, queue: true, operator: { select: { id: true, name: true } } },
-    });
-    return { success: true, data: ticket };
+  findOne(@Param('id') id: string) { return this.svc.findOne(id); }
+
+  @Get(':id/transitions')
+  getTransitions(@Param('id') id: string) { return this.svc.getAvailableTransitions(id); }
+
+  @Post()
+  issue(@Body() body: any, @CurrentUser() user: any) {
+    return this.svc.issue({ ...body, organizationId: body.organizationId ?? user?.organizationId });
+  }
+
+  @Post('self-issue')
+  selfIssue(@CurrentUser() user: any, @Body() body: any) {
+    return this.svc.issue({ ...body, customerId: user.id, organizationId: body.organizationId });
   }
 
   @Patch(':id/status')
-  @Roles(UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.BRANCH_MANAGER, UserRole.OPERATOR, UserRole.STAFF)
-  async updateStatus(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
-    return { success: true, data: await this.queuesService.transitionTicket(id, body.status as TicketStatus, user.id, body) };
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER, UserRole.SUPERVISOR, UserRole.OFFICER)
+  transition(@Param('id') id: string, @Body() body: { status: string; counterId?: string; notes?: string }, @CurrentUser() user: any) {
+    return this.svc.transition(id, body.status as any, user.id, { counterId: body.counterId, notes: body.notes });
+  }
+
+  @Patch(':id/advance')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER, UserRole.SUPERVISOR, UserRole.OFFICER)
+  advanceStep(@Param('id') id: string, @Body() body: { transitionId: string }, @CurrentUser() user: any) {
+    return this.svc.advanceStep(id, body.transitionId, user.id);
   }
 }

@@ -9,16 +9,35 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
   private _db!: PrismaInstance;
 
-  get db(): PrismaInstance {
-    return this._db;
-  }
+  get db(): PrismaInstance { return this._db; }
 
-  get user() { return this._db.user; }
+  // ── Core entities ──────────────────────────────────────────────────────────
+  get organization() { return this._db.organization; }
   get branch() { return this._db.branch; }
-  get service() { return this._db.service; }
-  get queue() { return this._db.queue; }
-  get queueTicket() { return this._db.queueTicket; }
+  get user() { return this._db.user; }
   get customer() { return this._db.customer; }
+
+  // ── Workflow ───────────────────────────────────────────────────────────────
+  get workflow() { return this._db.workflow; }
+  get workflowStep() { return this._db.workflowStep; }
+  get workflowTransition() { return this._db.workflowTransition; }
+
+  // ── Counter ────────────────────────────────────────────────────────────────
+  get counterGroup() { return this._db.counterGroup; }
+  get counter() { return this._db.counter; }
+
+  // ── Service & forms ────────────────────────────────────────────────────────
+  get service() { return this._db.service; }
+  get requirement() { return this._db.requirement; }
+  get form() { return this._db.form; }
+  get formField() { return this._db.formField; }
+
+  // ── Queue & ticket ─────────────────────────────────────────────────────────
+  get queue() { return this._db.queue; }
+  get ticket() { return this._db.ticket; }
+  get ticketEvent() { return this._db.ticketEvent; }
+
+  // ── Appointments & ops ─────────────────────────────────────────────────────
   get appointment() { return this._db.appointment; }
   get notification() { return this._db.notification; }
   get auditLog() { return this._db.auditLog; }
