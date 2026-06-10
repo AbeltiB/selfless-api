@@ -6,7 +6,7 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "build": "nest build",
+    "build": "npx prisma generate && nest build",
     "postprisma:generate": "node -e \"const fs=require('fs'),f='generated/prisma/client.ts',c=fs.readFileSync(f,'utf8').replace(/import \\\\* as process from 'node:process'\\\\nimport \\\\* as path from 'node:path'\\\\nimport \\{ fileURLToPath \\} from 'node:url'\\\\nglobalThis\\[.__dirname.\\] = path.dirname\\(fileURLToPath\\(import.meta.url\\)\\)\\\\n\\\\n/,'');fs.writeFileSync(f,c)\"",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
@@ -57,7 +57,7 @@
     "passport-local": "^1.0.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "selfless-sdk": "file:../selfless-sdk",
+    "selfless-sdk": "file:./packages/selfless-sdk-1.0.0.tgz",
     "swagger-ui-express": "^5.0.1",
     "uuid": "^14.0.0"
   },
