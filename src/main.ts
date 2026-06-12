@@ -19,24 +19,36 @@ async function bootstrap() {
 
   app.use(cookieParser());
 
-  // CORS_ORIGIN: single URL or comma-separated list
-  const rawOrigins = process.env.CORS_ORIGIN ?? 'http://localhost:3000';
-  const allowedOrigins = rawOrigins
-    .split(',')
-    .map((o) => o.trim())
-    .filter(Boolean);
+  // CORS_ORIGIN: '*', a single URL, or a comma-separated list
+  const rawOrigins = process.env.CORS_ORIGIN ?? '';
+  const allowAllOrigins = rawOrigins.trim() === '*';
+  const allowedOrigins = new Set(
+    rawOrigins
+      .split(',')
+      .map((o) => o.trim().replace(/\/+$/, ''))
+      .filter((o) => o && o !== '*'),
+  );
+  // Local dev + known production admin are always allowed
+  allowedOrigins.add('http://localhost:3000');
+  allowedOrigins.add('http://127.0.0.1:3000');
+  allowedOrigins.add('https://selfless-admin.vercel.app');
+
+  const isOriginAllowed = (origin: string): boolean => {
+    if (allowAllOrigins) return true;
+    const normalized = origin.replace(/\/+$/, '');
+    if (allowedOrigins.has(normalized)) return true;
+    // Vercel preview deployments (selfless-admin-<hash>-<team>.vercel.app)
+    return /^https:\/\/selfless-admin[a-z0-9-]*\.vercel\.app$/.test(normalized);
+  };
 
   app.enableCors({
     origin: (requestOrigin: string | undefined, callback: CorsCallback): void => {
-      if (!requestOrigin) {
+      if (!requestOrigin || isOriginAllowed(requestOrigin)) {
         callback(null, true);
         return;
       }
-      if (allowedOrigins.includes(requestOrigin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error(`CORS: origin '${requestOrigin}' not allowed`));
+      // Reject without throwing: browser blocks via missing CORS headers
+      callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
