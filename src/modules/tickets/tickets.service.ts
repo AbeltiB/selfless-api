@@ -93,12 +93,18 @@ export class TicketsService {
     const queue = await this.prisma.queue.findUnique({ where: { id: queueId }, include: { branch: true } });
     if (!queue || queue.status !== 'OPEN') throw new BadRequestException('Queue is not open');
 
+    // Only consider tickets issued today — stale tickets from previous
+    // days must never be called (they belong to the expiry worker)
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
     const next = await this.prisma.ticket.findFirst({
       where: {
         branchId: queue.branchId,
         serviceId: queue.serviceId,
         ...(queue.stepId ? { currentStepId: queue.stepId } : {}),
         status: TicketStatus.WAITING,
+        issuedAt: { gte: startOfToday },
       },
       orderBy: [{ priority: 'desc' }, { issuedAt: 'asc' }],
       include: { customer: true },
