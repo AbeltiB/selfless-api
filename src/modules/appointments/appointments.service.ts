@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { TicketsService } from '../tickets/tickets.service.js';
 import { AppointmentStatus } from 'selfless-sdk';
 
 @Injectable()
@@ -8,6 +9,7 @@ export class AppointmentsService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private tickets: TicketsService,
   ) {}
 
   async findAll(filter: { branchId?: string; serviceId?: string; customerId?: string; date?: string; status?: string }) {
@@ -102,7 +104,24 @@ export class AppointmentsService {
     if (appt.status !== AppointmentStatus.CONFIRMED && appt.status !== AppointmentStatus.PENDING) {
       throw new BadRequestException('Appointment cannot be checked in');
     }
-    return this.prisma.appointment.update({ where: { id }, data: { status: AppointmentStatus.CHECKED_IN } });
+
+    // Issue a queue ticket for the appointment — priority above walk-ins
+    const ticket = await this.tickets.issue({
+      organizationId: appt.organizationId,
+      branchId: appt.branchId,
+      serviceId: appt.serviceId,
+      customerId: appt.customerId ?? undefined,
+      priority: 1,
+      notes: `Appointment ${appt.scheduledAt.toISOString()}`,
+    });
+
+    const appointment = await this.prisma.appointment.update({
+      where: { id },
+      data: { status: AppointmentStatus.CHECKED_IN, ticketId: ticket.id },
+      include: { service: { select: { id: true, name: true } }, customer: true },
+    });
+
+    return { appointment, ticket };
   }
 
   async getAvailableSlots(branchId: string, serviceId: string, date: string) {
