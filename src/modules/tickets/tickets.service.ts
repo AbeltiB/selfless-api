@@ -184,6 +184,56 @@ export class TicketsService {
     return updated;
   }
 
+  // ── Transfer ticket ────────────────────────────────────────────────────
+
+  async transfer(
+    ticketId: string,
+    actorId: string,
+    dto: { toServiceId?: string; toStepId?: string; notes?: string },
+  ) {
+    const ticket = await this.prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket) throw new NotFoundException('Ticket not found');
+
+    const transferable = [TicketStatus.IN_SERVICE, TicketStatus.ON_HOLD, TicketStatus.WAITING, TicketStatus.CALLED];
+    if (!transferable.includes(ticket.status as TicketStatus)) {
+      throw new BadRequestException(`Ticket in status ${ticket.status} cannot be transferred`);
+    }
+
+    const data: any = { status: TicketStatus.WAITING, currentCounterId: null };
+    const meta: any = { notes: dto.notes };
+
+    if (dto.toServiceId) {
+      const svc = await this.prisma.service.findUnique({ where: { id: dto.toServiceId }, include: { workflow: { include: { steps: { where: { isInitial: true } } } } } });
+      if (!svc) throw new NotFoundException('Target service not found');
+      data.serviceId = dto.toServiceId;
+      data.workflowId = svc.workflowId ?? null;
+      data.currentStepId = svc.workflow?.steps?.[0]?.id ?? null;
+      meta.toServiceId = dto.toServiceId;
+      meta.toServiceName = svc.name;
+    } else if (dto.toStepId) {
+      const step = await this.prisma.workflowStep.findUnique({ where: { id: dto.toStepId } });
+      if (!step) throw new NotFoundException('Target step not found');
+      data.currentStepId = dto.toStepId;
+      meta.toStepId = dto.toStepId;
+      meta.toStepName = step.name;
+    } else {
+      throw new BadRequestException('Provide toServiceId or toStepId');
+    }
+
+    const updated = await this.prisma.ticket.update({
+      where: { id: ticketId },
+      data,
+      include: { customer: true, currentStep: true, currentCounter: true, service: { select: { name: true } } },
+    });
+
+    await this.logEvent(ticketId, TicketEventType.TRANSFERRED, actorId, ticket.status as TicketStatus, TicketStatus.WAITING, null, meta);
+
+    this.realtime.emitToBranch(updated.branchId, SOCKET_EVENTS.TICKET_STATUS_CHANGED, {
+      ticketId, queueNumber: updated.queueNumber, previousStatus: ticket.status, status: TicketStatus.WAITING, branchId: updated.branchId,
+    });
+    return updated;
+  }
+
   // ── Advance workflow step ──────────────────────────────────────────────
 
   async advanceStep(ticketId: string, transitionId: string, actorId: string) {
@@ -235,6 +285,7 @@ export class TicketsService {
         currentStep: { select: { id: true, name: true } },
         currentCounter: { select: { id: true, name: true } },
         service: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true } },
         operator: { select: { id: true, name: true } },
       },
       orderBy: [{ priority: 'desc' }, { issuedAt: 'asc' }],

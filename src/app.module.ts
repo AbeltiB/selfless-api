@@ -15,6 +15,8 @@ import { CustomersModule } from './modules/customers/customers.module.js';
 import { NotificationsModule } from './modules/notifications/notifications.module.js';
 import { AnalyticsModule } from './modules/analytics/analytics.module.js';
 import { RealtimeModule } from './modules/realtime/realtime.module.js';
+import { RequirementsModule } from './modules/requirements/requirements.module.js';
+import { FormsModule } from './modules/forms/forms.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 
@@ -35,6 +37,8 @@ import { RolesGuard } from './common/guards/roles.guard.js';
     NotificationsModule,
     AnalyticsModule,
     RealtimeModule,
+    RequirementsModule,
+    FormsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

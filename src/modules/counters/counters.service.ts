@@ -50,4 +50,35 @@ export class CountersService {
     await this.findOne(id);
     return this.prisma.counter.update({ where: { id }, data: dto });
   }
+
+  async getDisplayBoard(branchId: string) {
+    const counters = await this.prisma.counter.findMany({
+      where: { branchId, isActive: true },
+      include: {
+        group: { select: { id: true, name: true } },
+        currentTickets: {
+          where: { status: { in: ['CALLED', 'IN_SERVICE'] } },
+          orderBy: { calledAt: 'desc' },
+          take: 1,
+          include: { service: { select: { id: true, name: true } } },
+        },
+      },
+      orderBy: { code: 'asc' },
+    });
+
+    return counters.map((c) => ({
+      id: c.id,
+      name: c.name,
+      code: c.code,
+      group: c.group,
+      nowServing: c.currentTickets[0]
+        ? {
+            queueNumber: c.currentTickets[0].queueNumber,
+            status: c.currentTickets[0].status,
+            service: c.currentTickets[0].service,
+            calledAt: c.currentTickets[0].calledAt,
+          }
+        : null,
+    }));
+  }
 }

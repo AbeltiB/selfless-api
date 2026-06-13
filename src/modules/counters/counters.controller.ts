@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Patch, Param, Body, Query } from '@nestjs/common';
 import { CountersService } from './counters.service.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
+import { Public } from '../../common/decorators/public.decorator.js';
 import { UserRole } from 'selfless-sdk';
 
 @Controller('counters')
@@ -18,6 +19,10 @@ export class CountersController {
   @Patch('groups/:id')
   @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
   updateGroup(@Param('id') id: string, @Body() body: any) { return this.svc.updateGroup(id, body); }
+
+  @Get('display')
+  @Public()
+  getDisplay(@Query('branchId') branchId: string) { return this.svc.getDisplayBoard(branchId); }
 
   @Get()
   @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER, UserRole.SUPERVISOR, UserRole.OFFICER)
