@@ -158,6 +158,7 @@ model Organization {
   appointments       Appointment[]
   analyticsSnapshots AnalyticsSnapshot[]
   priorityFlags      PriorityFlag[]
+  notifications      Notification[]
 }
 
 // ─── Branch ───────────────────────────────────────────────────────────────────
@@ -596,16 +597,20 @@ model Appointment {
 // ─── Notification ─────────────────────────────────────────────────────────────
 
 model Notification {
-  id          String              @id @default(uuid())
-  channel     NotificationChannel
-  recipientId String?
-  subject     String?
-  body        String
-  status      String              @default("PENDING")
-  metadata    Json?
-  sentAt      DateTime?
-  error       String?
-  createdAt   DateTime            @default(now())
+  id             String              @id @default(uuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel        NotificationChannel
+  recipientId    String?
+  subject        String?
+  body           String
+  status         String              @default("PENDING")
+  metadata       Json?
+  sentAt         DateTime?
+  error          String?
+  createdAt      DateTime            @default(now())
+
+  @@index([organizationId, createdAt])
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────

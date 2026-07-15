@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsUUID, IsInt, IsObject, IsEnum, Matches } from 'class-validator';
+import { IsString, IsOptional, IsUUID, IsInt, IsObject, IsEnum, Matches, Min } from 'class-validator';
 import { TicketStatus } from 'selfless-sdk';
 import { PHONE_REGEX, PHONE_INVALID_MESSAGE } from '../../auth/dto/phone.constant.js';
 
@@ -51,6 +51,15 @@ export class TransitionTicketDto {
 export class AdvanceTicketDto {
   @IsUUID()
   transitionId!: string;
+}
+
+export class SlaBreachDto {
+  @IsUUID()
+  stepId!: string;
+
+  @IsInt()
+  @Min(1)
+  slaMinutes!: number;
 }
 
 export class TransferTicketDto {

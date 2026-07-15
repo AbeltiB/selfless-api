@@ -4,8 +4,9 @@ import { TicketsService, TicketViewer } from './tickets.service.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
 import { AnyAccount } from '../../common/decorators/any-account.decorator.js';
+import { ServiceAuth } from '../../common/decorators/service-auth.decorator.js';
 import { UserRole } from 'selfless-sdk';
-import { IssueTicketDto, SelfIssueTicketDto, TransitionTicketDto, AdvanceTicketDto, TransferTicketDto } from './dto/ticket.dto.js';
+import { IssueTicketDto, SelfIssueTicketDto, TransitionTicketDto, AdvanceTicketDto, TransferTicketDto, SlaBreachDto } from './dto/ticket.dto.js';
 
 const ANY_STAFF = [UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER, UserRole.SUPERVISOR, UserRole.OFFICER];
 
@@ -65,6 +66,26 @@ export class TicketsController {
   @AnyAccount()
   getTransitions(@Param('id') id: string, @CurrentUser() user: any) {
     return this.svc.getAvailableTransitions(id, this.viewerFor(user));
+  }
+
+  // ── Internal (called by the worker via WORKER_SERVICE_TOKEN, never by an account) ──────
+
+  @Get(':id/internal')
+  @ServiceAuth()
+  getInternal(@Param('id') id: string) {
+    return this.svc.getInternal(id);
+  }
+
+  @Patch(':id/expire')
+  @ServiceAuth()
+  expire(@Param('id') id: string) {
+    return this.svc.expire(id);
+  }
+
+  @Post(':id/sla-breach')
+  @ServiceAuth()
+  slaBreach(@Param('id') id: string, @Body() dto: SlaBreachDto) {
+    return this.svc.recordSlaBreach(id, dto.stepId, dto.slaMinutes);
   }
 
   @Post()

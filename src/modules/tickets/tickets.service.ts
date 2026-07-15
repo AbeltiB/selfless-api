@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { RealtimeGateway } from '../realtime/realtime.gateway.js';
 import { WorkflowsService } from '../workflows/workflows.service.js';
+import { JobQueueService } from '../../common/queue/job-queue.service.js';
 import { TicketStatus, TicketEventType, VALID_TICKET_TRANSITIONS, SOCKET_EVENTS, generateTicketNumber } from 'selfless-sdk';
 import { IssueTicketDto, TransferTicketDto } from './dto/ticket.dto.js';
 import { getBranchDayStart } from '../../common/utils/branch-time.util.js';
@@ -13,6 +14,16 @@ export interface TicketViewer {
   isSuperAdmin: boolean;
 }
 
+// How long a ticket may sit WAITING before the ticket-expiry worker auto-expires it. Configurable
+// (not a requireEnv secret) so it can be shortened for local/manual testing of the expiry flow.
+const TICKET_EXPIRY_DELAY_MINUTES = Number(process.env.TICKET_EXPIRY_MINUTES) || 120;
+
+interface StepForSla {
+  id: string;
+  name: string;
+  slaMinutes: number | null;
+}
+
 @Injectable()
 export class TicketsService {
   constructor(
@@ -20,6 +31,7 @@ export class TicketsService {
     private notifications: NotificationsService,
     private realtime: RealtimeGateway,
     private workflows: WorkflowsService,
+    private jobQueue: JobQueueService,
   ) {}
 
   // ── Issue a ticket ─────────────────────────────────────────────────────
@@ -101,8 +113,13 @@ export class TicketsService {
     await this.logEvent(ticket.id, TicketEventType.CREATED, null, null, TicketStatus.WAITING, null);
 
     if (ticket.customer?.telegramId) {
-      this.notifications.sendTelegram(ticket.customer.telegramId, `🎫 Your ticket is *${queueNumber}* at ${branch.name} for ${service.name}. Please wait for your turn.`).catch(() => {});
+      this.notifications.sendTelegram(ticket.customer.telegramId, `🎫 Your ticket is *${queueNumber}* at ${branch.name} for ${service.name}. Please wait for your turn.`, { organizationId, ticketId: ticket.id, customerId: ticket.customerId ?? undefined }).catch(() => {});
     }
+
+    // Ticket is created straight into WAITING — schedule its staleness expiry and, if the
+    // initial step carries an SLA, its breach check.
+    this.scheduleExpiry(organizationId, ticket.id, dto.branchId, dto.serviceId, ticket.currentStepId).catch(() => {});
+    this.scheduleSlaCheck(organizationId, ticket.id, initialStep).catch(() => {});
 
     this.realtime.emitToBranch(dto.branchId, SOCKET_EVENTS.TICKET_CREATED, { ticket });
     return ticket;
@@ -235,7 +252,7 @@ export class TicketsService {
     // Notify customer when called
     if (newStatus === TicketStatus.CALLED && updated.customer?.telegramId) {
       const counterName = updated.currentCounter?.name ?? 'your counter';
-      this.notifications.sendTelegram(updated.customer.telegramId, `📢 *Ticket ${updated.queueNumber}* — please proceed to *${counterName}* now!`).catch(() => {});
+      this.notifications.sendTelegram(updated.customer.telegramId, `📢 *Ticket ${updated.queueNumber}* — please proceed to *${counterName}* now!`, { organizationId: updated.organizationId, ticketId: updated.id, customerId: updated.customerId ?? undefined }).catch(() => {});
     }
 
     this.realtime.emitToBranch(updated.branchId, SOCKET_EVENTS.TICKET_STATUS_CHANGED, {
@@ -258,6 +275,7 @@ export class TicketsService {
 
     const data: any = { status: TicketStatus.WAITING, currentCounterId: null };
     const meta: any = { notes: dto.notes };
+    let destinationStep: StepForSla | null = null;
 
     if (dto.toServiceId) {
       const svc = await this.prisma.service.findUnique({ where: { id: dto.toServiceId }, include: { workflow: { include: { steps: { where: { isInitial: true } } } }, branch: true } });
@@ -265,7 +283,8 @@ export class TicketsService {
       if (scopeOrgId && svc.branch.organizationId !== scopeOrgId) throw new ForbiddenException('Target service is outside your organization.');
       data.serviceId = dto.toServiceId;
       data.workflowId = svc.workflowId ?? null;
-      data.currentStepId = svc.workflow?.steps?.[0]?.id ?? null;
+      destinationStep = svc.workflow?.steps?.[0] ?? null;
+      data.currentStepId = destinationStep?.id ?? null;
       meta.toServiceId = dto.toServiceId;
       meta.toServiceName = svc.name;
     } else if (dto.toStepId) {
@@ -273,6 +292,7 @@ export class TicketsService {
       if (!step) throw new NotFoundException('Target step not found');
       if (scopeOrgId && step.workflow.organizationId !== scopeOrgId) throw new ForbiddenException('Target step is outside your organization.');
       data.currentStepId = dto.toStepId;
+      destinationStep = step;
       meta.toStepId = dto.toStepId;
       meta.toStepName = step.name;
     } else {
@@ -286,6 +306,10 @@ export class TicketsService {
     });
 
     await this.logEvent(ticketId, TicketEventType.TRANSFERRED, actorId, ticket.status as TicketStatus, TicketStatus.WAITING, null, meta);
+
+    // Transfer puts the ticket back into WAITING on a (possibly new) step — re-arm both timers.
+    this.scheduleExpiry(updated.organizationId, ticketId, updated.branchId, updated.serviceId, updated.currentStepId).catch(() => {});
+    this.scheduleSlaCheck(updated.organizationId, ticketId, destinationStep).catch(() => {});
 
     this.realtime.emitToBranch(updated.branchId, SOCKET_EVENTS.TICKET_STATUS_CHANGED, {
       ticketId, queueNumber: updated.queueNumber, previousStatus: ticket.status, status: TicketStatus.WAITING, branchId: updated.branchId,
@@ -326,6 +350,12 @@ export class TicketsService {
     });
 
     await this.logEvent(ticketId, isFinal ? TicketEventType.COMPLETED : TicketEventType.STEP_ADVANCED, actorId, ticket.status as TicketStatus, updated.status as TicketStatus, null, { transitionId, toStep: transition.destinationStep.name });
+
+    if (!isFinal) {
+      // Advancing to a non-final step puts the ticket back into WAITING — re-arm both timers.
+      this.scheduleExpiry(ticket.organizationId, ticketId, ticket.branchId, ticket.serviceId, updated.currentStepId).catch(() => {});
+      this.scheduleSlaCheck(ticket.organizationId, ticketId, transition.destinationStep).catch(() => {});
+    }
 
     this.realtime.emitToBranch(ticket.branchId, SOCKET_EVENTS.TICKET_STEP_ADVANCED, { ticketId, toStep: transition.destinationStep });
     return updated;
@@ -393,7 +423,63 @@ export class TicketsService {
     if (!ownsAsStaff && !ownsAsCustomer) throw new NotFoundException('Ticket not found');
   }
 
+  // ── Internal (service-auth, called by the worker) ─────────────────────
+
+  /** Minimal ticket read for the SLA-check worker — not the customer/staff-facing findOne(). */
+  async getInternal(id: string) {
+    const t = await this.prisma.ticket.findUnique({
+      where: { id },
+      select: { id: true, status: true, currentStepId: true, branchId: true, queueNumber: true },
+    });
+    if (!t) throw new NotFoundException('Ticket not found');
+    return t;
+  }
+
+  /** Called by the ticket-expiry worker. Idempotent: a ticket that already moved on is a no-op, not an error. */
+  async expire(id: string) {
+    const ticket = await this.prisma.ticket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    if (ticket.status !== TicketStatus.CREATED && ticket.status !== TicketStatus.WAITING) {
+      return { skipped: true, reason: `ticket already ${ticket.status}` };
+    }
+    const updated = await this.transition(id, TicketStatus.EXPIRED);
+    return { expired: true, ticketId: updated.id };
+  }
+
+  /** Called by the ticket-sla worker once it's confirmed (via getInternal) the ticket is still on the flagged step. */
+  async recordSlaBreach(ticketId: string, stepId: string, slaMinutes: number) {
+    const ticket = await this.prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket) throw new NotFoundException('Ticket not found');
+    await this.logEvent(ticketId, TicketEventType.NOTE_ADDED, null, null, null, null, { slaBreach: true, stepId, slaMinutes });
+    this.realtime.emitToBranch(ticket.branchId, SOCKET_EVENTS.TICKET_STATUS_CHANGED, {
+      ticketId, queueNumber: ticket.queueNumber, previousStatus: ticket.status, status: ticket.status, branchId: ticket.branchId,
+    });
+    return { breached: true, ticketId, stepId };
+  }
+
   // ── Private ────────────────────────────────────────────────────────────
+
+  private async scheduleExpiry(organizationId: string, ticketId: string, branchId: string, serviceId: string, stepId?: string | null) {
+    // `queueId` on the job payload refers to the business Queue "channel" row (branch+service+step
+    // opened-today), not this BullMQ queue — best-effort resolve one, but the expiry processor
+    // doesn't actually key off it, so an empty string when none is open yet is harmless.
+    const queue = await this.prisma.queue.findFirst({
+      where: { branchId, serviceId, ...(stepId ? { stepId } : {}) },
+      orderBy: { createdAt: 'desc' },
+    });
+    await this.jobQueue.enqueueTicketExpiry(
+      { organizationId, timestamp: new Date().toISOString(), ticketId, queueId: queue?.id ?? '' },
+      TICKET_EXPIRY_DELAY_MINUTES * 60_000,
+    );
+  }
+
+  private async scheduleSlaCheck(organizationId: string, ticketId: string, step: StepForSla | null | undefined) {
+    if (!step?.slaMinutes) return;
+    await this.jobQueue.enqueueTicketSla(
+      { organizationId, timestamp: new Date().toISOString(), ticketId, stepId: step.id, stepName: step.name, slaMinutes: step.slaMinutes },
+      step.slaMinutes * 60_000,
+    );
+  }
 
   private async logEvent(
     ticketId: string, eventType: TicketEventType, actorId: string | null,

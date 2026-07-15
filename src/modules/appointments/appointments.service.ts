@@ -83,7 +83,7 @@ export class AppointmentsService {
 
     if (appt.customer?.telegramId) {
       const when = scheduledAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
-      this.notifications.sendTelegram(appt.customer.telegramId, `📅 Appointment confirmed at *${appt.branch.name}* for *${appt.service.name}* on ${when}.`).catch(() => {});
+      this.notifications.sendTelegram(appt.customer.telegramId, `📅 Appointment confirmed at *${appt.branch.name}* for *${appt.service.name}* on ${when}.`, { organizationId: appt.organizationId, customerId: appt.customerId ?? undefined }).catch(() => {});
     }
 
     return appt;
@@ -94,10 +94,10 @@ export class AppointmentsService {
     const updated = await this.prisma.appointment.update({ where: { id }, data: { status } });
 
     if (status === AppointmentStatus.CONFIRMED && appt.customer?.telegramId) {
-      this.notifications.sendTelegram(appt.customer.telegramId, `✅ Your appointment has been confirmed!`).catch(() => {});
+      this.notifications.sendTelegram(appt.customer.telegramId, `✅ Your appointment has been confirmed!`, { organizationId: appt.organizationId, customerId: appt.customerId ?? undefined }).catch(() => {});
     }
     if (status === AppointmentStatus.CANCELLED && appt.customer?.telegramId) {
-      this.notifications.sendTelegram(appt.customer.telegramId, `❌ Your appointment has been cancelled.`).catch(() => {});
+      this.notifications.sendTelegram(appt.customer.telegramId, `❌ Your appointment has been cancelled.`, { organizationId: appt.organizationId, customerId: appt.customerId ?? undefined }).catch(() => {});
     }
 
     return updated;

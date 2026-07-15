@@ -2,6 +2,7 @@ import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/com
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator.js';
+import { IS_SERVICE_AUTH_KEY } from '../decorators/service-auth.decorator.js';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
@@ -15,6 +16,15 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       context.getClass(),
     ]);
     if (isPublic) return true;
+
+    // @ServiceAuth() routes are authenticated by ServiceAuthGuard's shared-secret check
+    // instead, not an account JWT.
+    const isServiceAuth = this.reflector.getAllAndOverride<boolean>(IS_SERVICE_AUTH_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isServiceAuth) return true;
+
     return super.canActivate(context);
   }
 

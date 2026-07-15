@@ -4,6 +4,7 @@ import { UserRole } from 'selfless-sdk';
 import { ROLES_KEY } from '../decorators/roles.decorator.js';
 import { IS_ANY_ACCOUNT_KEY } from '../decorators/any-account.decorator.js';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator.js';
+import { IS_SERVICE_AUTH_KEY } from '../decorators/service-auth.decorator.js';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -12,6 +13,11 @@ export class RolesGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [context.getHandler(), context.getClass()]);
     if (isPublic) return true;
+
+    // Third valid access policy alongside @Public()/@Roles()/@AnyAccount() — the actual check
+    // happens in ServiceAuthGuard, not here.
+    const isServiceAuth = this.reflector.getAllAndOverride<boolean>(IS_SERVICE_AUTH_KEY, [context.getHandler(), context.getClass()]);
+    if (isServiceAuth) return true;
 
     const requiredRoles = this.reflector.getAllAndOverride<UserRole[]>(ROLES_KEY, [context.getHandler(), context.getClass()]);
     const isAnyAccount = this.reflector.getAllAndOverride<boolean>(IS_ANY_ACCOUNT_KEY, [context.getHandler(), context.getClass()]);
