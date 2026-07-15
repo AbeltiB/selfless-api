@@ -1,47 +1,73 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body } from '@nestjs/common';
 import { WorkflowsService } from './workflows.service.js';
 import { Roles } from '../../common/decorators/roles.decorator.js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
+import { ActiveOrg } from '../../common/decorators/active-org.decorator.js';
 import { UserRole } from 'selfless-sdk';
+import { CreateWorkflowDto, UpdateWorkflowDto, AddStepDto, UpdateStepDto, AddTransitionDto } from './dto/workflow.dto.js';
+
+const MANAGERS = [UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER];
+const ADMINS = [UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN];
 
 @Controller('workflows')
 export class WorkflowsController {
   constructor(private svc: WorkflowsService) {}
 
+  private scopeFor(user: any): string | undefined {
+    return user.activeRole === UserRole.SUPER_ADMIN ? undefined : user.activeOrgId;
+  }
+
   @Get()
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
-  findAll(@Query('organizationId') orgId: string) { return this.svc.findAll(orgId); }
+  @Roles(...MANAGERS)
+  findAll(@ActiveOrg() organizationId: string) {
+    return this.svc.findAll(organizationId);
+  }
 
   @Get(':id')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN, UserRole.BRANCH_MANAGER)
-  findOne(@Param('id') id: string) { return this.svc.findOne(id); }
+  @Roles(...MANAGERS)
+  findOne(@Param('id') id: string, @CurrentUser() user: any) {
+    return this.svc.findOne(id, this.scopeFor(user));
+  }
 
   @Post()
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  create(@Body() body: any) { return this.svc.create(body); }
+  @Roles(...ADMINS)
+  create(@Body() dto: CreateWorkflowDto, @ActiveOrg() organizationId: string) {
+    return this.svc.create(organizationId, dto);
+  }
 
   @Patch(':id')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  update(@Param('id') id: string, @Body() body: any) { return this.svc.update(id, body); }
+  @Roles(...ADMINS)
+  update(@Param('id') id: string, @Body() dto: UpdateWorkflowDto, @CurrentUser() user: any) {
+    return this.svc.update(id, dto, this.scopeFor(user));
+  }
 
-  // Steps
   @Post(':id/steps')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  addStep(@Param('id') id: string, @Body() body: any) { return this.svc.addStep(id, body); }
+  @Roles(...ADMINS)
+  addStep(@Param('id') id: string, @Body() dto: AddStepDto, @CurrentUser() user: any) {
+    return this.svc.addStep(id, dto, this.scopeFor(user));
+  }
 
   @Patch(':id/steps/:stepId')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  updateStep(@Param('stepId') stepId: string, @Body() body: any) { return this.svc.updateStep(stepId, body); }
+  @Roles(...ADMINS)
+  updateStep(@Param('stepId') stepId: string, @Body() dto: UpdateStepDto, @CurrentUser() user: any) {
+    return this.svc.updateStep(stepId, dto, this.scopeFor(user));
+  }
 
   @Delete(':id/steps/:stepId')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  deleteStep(@Param('stepId') stepId: string) { return this.svc.deleteStep(stepId); }
+  @Roles(...ADMINS)
+  deleteStep(@Param('stepId') stepId: string, @CurrentUser() user: any) {
+    return this.svc.deleteStep(stepId, this.scopeFor(user));
+  }
 
-  // Transitions
   @Post(':id/transitions')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  addTransition(@Param('id') id: string, @Body() body: any) { return this.svc.addTransition(id, body); }
+  @Roles(...ADMINS)
+  addTransition(@Param('id') id: string, @Body() dto: AddTransitionDto, @CurrentUser() user: any) {
+    return this.svc.addTransition(id, dto, this.scopeFor(user));
+  }
 
   @Delete(':id/transitions/:transId')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
-  deleteTransition(@Param('transId') transId: string) { return this.svc.deleteTransition(transId); }
+  @Roles(...ADMINS)
+  deleteTransition(@Param('transId') transId: string, @CurrentUser() user: any) {
+    return this.svc.deleteTransition(transId, this.scopeFor(user));
+  }
 }

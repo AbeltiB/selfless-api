@@ -1,13 +1,14 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { CreateWorkflowDto, UpdateWorkflowDto, AddStepDto, UpdateStepDto, AddTransitionDto } from './dto/workflow.dto.js';
 
 @Injectable()
 export class WorkflowsService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(organizationId: string) {
+  async findAll(scopeOrgId: string) {
     return this.prisma.workflow.findMany({
-      where: { organizationId },
+      where: { organizationId: scopeOrgId },
       include: {
         steps: { orderBy: { order: 'asc' }, include: { counterGroup: { select: { id: true, name: true } } } },
         _count: { select: { services: true } },
@@ -16,9 +17,9 @@ export class WorkflowsService {
     });
   }
 
-  async findOne(id: string) {
-    const wf = await this.prisma.workflow.findUnique({
-      where: { id },
+  async findOne(id: string, scopeOrgId?: string) {
+    const wf = await this.prisma.workflow.findFirst({
+      where: { id, ...(scopeOrgId ? { organizationId: scopeOrgId } : {}) },
       include: {
         steps: {
           orderBy: { order: 'asc' },
@@ -33,22 +34,19 @@ export class WorkflowsService {
     return wf;
   }
 
-  async create(dto: { organizationId: string; name: string; description?: string }) {
-    return this.prisma.workflow.create({ data: { ...dto, isActive: true } });
+  async create(organizationId: string, dto: CreateWorkflowDto) {
+    return this.prisma.workflow.create({ data: { ...dto, organizationId, isActive: true } });
   }
 
-  async update(id: string, dto: { name?: string; description?: string; isActive?: boolean }) {
-    await this.findOne(id);
+  async update(id: string, dto: UpdateWorkflowDto, scopeOrgId?: string) {
+    await this.findOne(id, scopeOrgId);
     return this.prisma.workflow.update({ where: { id }, data: dto });
   }
 
   // ── Steps ──────────────────────────────────────────────────────────────
 
-  async addStep(workflowId: string, dto: {
-    name: string; stepType: string; order: number; slaMinutes?: number;
-    counterGroupId?: string; isInitial?: boolean; isFinal?: boolean;
-  }) {
-    await this.findOne(workflowId);
+  async addStep(workflowId: string, dto: AddStepDto, scopeOrgId?: string) {
+    await this.findOne(workflowId, scopeOrgId);
     if (dto.isInitial) {
       const existingInitial = await this.prisma.workflowStep.findFirst({ where: { workflowId, isInitial: true } });
       if (existingInitial) throw new BadRequestException('Workflow already has an initial step');
@@ -56,25 +54,36 @@ export class WorkflowsService {
     return this.prisma.workflowStep.create({ data: { workflowId, ...dto } as any });
   }
 
-  async updateStep(stepId: string, dto: { name?: string; stepType?: string; order?: number; slaMinutes?: number; counterGroupId?: string; isInitial?: boolean; isFinal?: boolean }) {
+  async updateStep(stepId: string, dto: UpdateStepDto, scopeOrgId?: string) {
+    await this.assertStepInScope(stepId, scopeOrgId);
     return this.prisma.workflowStep.update({ where: { id: stepId }, data: dto as any });
   }
 
-  async deleteStep(stepId: string) {
+  async deleteStep(stepId: string, scopeOrgId?: string) {
+    await this.assertStepInScope(stepId, scopeOrgId);
     await this.prisma.workflowTransition.deleteMany({ where: { OR: [{ sourceStepId: stepId }, { destinationStepId: stepId }] } });
     return this.prisma.workflowStep.delete({ where: { id: stepId } });
   }
 
   // ── Transitions ────────────────────────────────────────────────────────
 
-  async addTransition(workflowId: string, dto: {
-    sourceStepId: string; destinationStepId: string; label?: string; condition?: any; order?: number;
-  }) {
-    return this.prisma.workflowTransition.create({ data: { workflowId, ...dto, order: dto.order ?? 0 } });
+  async addTransition(workflowId: string, dto: AddTransitionDto, scopeOrgId?: string) {
+    await this.findOne(workflowId, scopeOrgId);
+    return this.prisma.workflowTransition.create({ data: { workflowId, ...dto, order: dto.order ?? 0 } as any });
   }
 
-  async deleteTransition(id: string) {
+  async deleteTransition(id: string, scopeOrgId?: string) {
+    if (scopeOrgId) {
+      const trans = await this.prisma.workflowTransition.findUnique({ where: { id }, include: { sourceStep: { include: { workflow: true } } } });
+      if (!trans || trans.sourceStep.workflow.organizationId !== scopeOrgId) throw new NotFoundException('Transition not found');
+    }
     return this.prisma.workflowTransition.delete({ where: { id } });
+  }
+
+  private async assertStepInScope(stepId: string, scopeOrgId?: string) {
+    if (!scopeOrgId) return;
+    const step = await this.prisma.workflowStep.findUnique({ where: { id: stepId }, include: { workflow: true } });
+    if (!step || step.workflow.organizationId !== scopeOrgId) throw new NotFoundException('Step not found');
   }
 
   // ── Used by ticket engine ──────────────────────────────────────────────
@@ -97,8 +106,9 @@ export class WorkflowsService {
         case 'neq': return val !== cond.value;
         case 'gt': return Number(val) > Number(cond.value);
         case 'gte': return Number(val) >= Number(cond.value);
-        case 'lt': return Number(val) < Number(cond.value);
-        case 'lte': return Number(val) <= Number(cond.value);
+        case 'lt': return Number(val) <= Number(cond.value);
+        case 'contains': return typeof val === 'string' && typeof cond.value === 'string' && val.includes(cond.value);
+        case 'in': return Array.isArray(cond.value) && cond.value.includes(val);
         default: return true;
       }
     });

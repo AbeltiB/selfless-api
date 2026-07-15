@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { TicketsService } from '../tickets/tickets.service.js';
 import { AppointmentStatus } from 'selfless-sdk';
+import { CreateAppointmentDto } from './dto/appointment.dto.js';
 
 @Injectable()
 export class AppointmentsService {
@@ -12,12 +13,13 @@ export class AppointmentsService {
     private tickets: TicketsService,
   ) {}
 
-  async findAll(filter: { branchId?: string; serviceId?: string; customerId?: string; date?: string; status?: string }) {
+  async findAll(filter: { branchId?: string; serviceId?: string; customerId?: string; date?: string; status?: string }, scopeOrgId?: string) {
     const where: any = {};
     if (filter.branchId) where.branchId = filter.branchId;
     if (filter.serviceId) where.serviceId = filter.serviceId;
     if (filter.customerId) where.customerId = filter.customerId;
     if (filter.status) where.status = filter.status;
+    if (scopeOrgId) where.organizationId = scopeOrgId;
     if (filter.date) {
       const d = new Date(filter.date); d.setHours(0, 0, 0, 0);
       const d2 = new Date(filter.date); d2.setHours(23, 59, 59, 999);
@@ -31,32 +33,34 @@ export class AppointmentsService {
         customer: { select: { id: true, firstName: true, lastName: true, phone: true, telegramId: true } },
       },
       orderBy: { scheduledAt: 'asc' },
+      take: 500,
     });
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, access?: { scopeOrgId?: string; selfAccountId?: string }) {
     const a = await this.prisma.appointment.findUnique({
       where: { id },
       include: { service: true, branch: true, customer: true },
     });
     if (!a) throw new NotFoundException('Appointment not found');
+    if (access) {
+      const ownsAsStaff = !!access.scopeOrgId && a.organizationId === access.scopeOrgId;
+      const ownsAsSelf = !!access.selfAccountId && a.customerId === access.selfAccountId;
+      const isSuperAdminBypass = access.scopeOrgId === undefined && access.selfAccountId === undefined;
+      if (!ownsAsStaff && !ownsAsSelf && !isSuperAdminBypass) throw new NotFoundException('Appointment not found');
+    }
     return a;
   }
 
-  async create(dto: {
-    organizationId: string;
-    branchId: string;
-    serviceId: string;
-    customerId?: string;
-    scheduledAt: string;
-    duration?: number;
-    notes?: string;
-  }) {
+  async create(organizationId: string, dto: CreateAppointmentDto, selfCustomerId?: string) {
     const scheduledAt = new Date(dto.scheduledAt);
     if (scheduledAt <= new Date()) throw new BadRequestException('Appointment must be in the future');
 
-    const service = await this.prisma.service.findUnique({ where: { id: dto.serviceId } });
-    if (!service || (service.serviceType === 'WALK_IN')) throw new BadRequestException('Service does not accept appointments');
+    const service = await this.prisma.service.findUnique({ where: { id: dto.serviceId }, include: { branch: true } });
+    if (!service || service.serviceType === 'WALK_IN') throw new BadRequestException('Service does not accept appointments');
+    if (service.branch.organizationId !== organizationId || service.branchId !== dto.branchId) {
+      throw new ForbiddenException('That branch/service does not belong to this organization.');
+    }
 
     // Slot conflict check
     const slotEnd = new Date(scheduledAt.getTime() + (dto.duration ?? 30) * 60000);
@@ -71,12 +75,12 @@ export class AppointmentsService {
     });
     if (conflict) throw new BadRequestException('Time slot not available');
 
+    const customerId = selfCustomerId ?? dto.customerId;
     const appt = await this.prisma.appointment.create({
-      data: { organizationId: dto.organizationId, branchId: dto.branchId, serviceId: dto.serviceId, customerId: dto.customerId ?? null, scheduledAt, duration: dto.duration ?? 30, notes: dto.notes ?? null, status: AppointmentStatus.PENDING },
+      data: { organizationId, branchId: dto.branchId, serviceId: dto.serviceId, customerId: customerId ?? null, scheduledAt, duration: dto.duration ?? 30, notes: dto.notes ?? null, status: AppointmentStatus.PENDING },
       include: { service: { select: { name: true } }, branch: { select: { name: true } }, customer: true },
     });
 
-    // Telegram confirmation
     if (appt.customer?.telegramId) {
       const when = scheduledAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
       this.notifications.sendTelegram(appt.customer.telegramId, `📅 Appointment confirmed at *${appt.branch.name}* for *${appt.service.name}* on ${when}.`).catch(() => {});
@@ -85,8 +89,8 @@ export class AppointmentsService {
     return appt;
   }
 
-  async updateStatus(id: string, status: AppointmentStatus) {
-    const appt = await this.findOne(id);
+  async updateStatus(id: string, status: AppointmentStatus, scopeOrgId?: string) {
+    const appt = await this.findOne(id, { scopeOrgId });
     const updated = await this.prisma.appointment.update({ where: { id }, data: { status } });
 
     if (status === AppointmentStatus.CONFIRMED && appt.customer?.telegramId) {
@@ -99,25 +103,30 @@ export class AppointmentsService {
     return updated;
   }
 
-  async checkIn(id: string) {
-    const appt = await this.findOne(id);
-    if (appt.status !== AppointmentStatus.CONFIRMED && appt.status !== AppointmentStatus.PENDING) {
-      throw new BadRequestException('Appointment cannot be checked in');
+  async checkIn(id: string, scopeOrgId?: string) {
+    const appt = await this.findOne(id, { scopeOrgId });
+
+    // Atomic claim: only one concurrent check-in call can flip PENDING/CONFIRMED -> CHECKED_IN.
+    // A second simultaneous call sees count 0 and is rejected before ever issuing a ticket.
+    const claim = await this.prisma.appointment.updateMany({
+      where: { id, status: { in: [AppointmentStatus.CONFIRMED, AppointmentStatus.PENDING] } },
+      data: { status: AppointmentStatus.CHECKED_IN },
+    });
+    if (claim.count === 0) {
+      throw new ConflictException('Appointment already checked in or cannot be checked in.');
     }
 
-    // Issue a queue ticket for the appointment — priority above walk-ins
-    const ticket = await this.tickets.issue({
-      organizationId: appt.organizationId,
+    const ticket = await this.tickets.issue(appt.organizationId, {
       branchId: appt.branchId,
       serviceId: appt.serviceId,
       customerId: appt.customerId ?? undefined,
-      priority: 1,
       notes: `Appointment ${appt.scheduledAt.toISOString()}`,
+      priorityFlagIds: [],
     });
 
     const appointment = await this.prisma.appointment.update({
       where: { id },
-      data: { status: AppointmentStatus.CHECKED_IN, ticketId: ticket.id },
+      data: { ticketId: ticket.id },
       include: { service: { select: { id: true, name: true } }, customer: true },
     });
 

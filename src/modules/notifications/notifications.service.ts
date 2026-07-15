@@ -14,6 +14,7 @@ export class NotificationsService {
     this.connection = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
       maxRetriesPerRequest: null,
     });
+    this.connection.on('error', (err) => this.logger.error(`Redis connection error: ${err.message}`));
     this.emailQueue = new Queue(QUEUE_NAMES.NOTIFICATION_EMAIL, { connection: this.connection });
     this.telegramQueue = new Queue(QUEUE_NAMES.NOTIFICATION_TELEGRAM, { connection: this.connection });
   }

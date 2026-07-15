@@ -15,6 +15,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     if (process.env.REDIS_URL) {
       const pubClient = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
       const subClient = pubClient.duplicate();
+      pubClient.on('error', (err) => console.error(`Realtime Redis pub error: ${err.message}`));
+      subClient.on('error', (err) => console.error(`Realtime Redis sub error: ${err.message}`));
       server.adapter(createAdapter(pubClient as any, subClient as any));
     }
   }

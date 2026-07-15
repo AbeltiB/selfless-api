@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { TicketStatus } from 'selfless-sdk';
 
@@ -6,7 +6,15 @@ import { TicketStatus } from 'selfless-sdk';
 export class AnalyticsService {
   constructor(private prisma: PrismaService) {}
 
-  async getDashboard(branchId: string, organizationId?: string, days = 7) {
+  async assertBranchInScope(branchId: string, scopeOrgId?: string) {
+    if (!scopeOrgId || !branchId) return;
+    const branch = await this.prisma.branch.findUnique({ where: { id: branchId } });
+    if (!branch || branch.organizationId !== scopeOrgId) {
+      throw new ForbiddenException('That branch does not belong to your organization.');
+    }
+  }
+
+  async getDashboard(branchId: string, organizationId: string | undefined, days = 7) {
     const from = new Date();
     from.setDate(from.getDate() - days);
     from.setHours(0, 0, 0, 0);

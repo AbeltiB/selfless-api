@@ -14,8 +14,17 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   // ── Core entities ──────────────────────────────────────────────────────────
   get organization() { return this._db.organization; }
   get branch() { return this._db.branch; }
-  get user() { return this._db.user; }
-  get customer() { return this._db.customer; }
+
+  // ── Identity & auth ────────────────────────────────────────────────────────
+  get account() { return this._db.account; }
+  get orgMembership() { return this._db.orgMembership; }
+  get otpVerification() { return this._db.otpVerification; }
+  get trustedDevice() { return this._db.trustedDevice; }
+
+  // ── Priority / fairness flags ──────────────────────────────────────────────
+  get priorityFlag() { return this._db.priorityFlag; }
+  get accountPriorityFlag() { return this._db.accountPriorityFlag; }
+  get ticketPriorityFlag() { return this._db.ticketPriorityFlag; }
 
   // ── Workflow ───────────────────────────────────────────────────────────────
   get workflow() { return this._db.workflow; }
@@ -43,8 +52,11 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   get auditLog() { return this._db.auditLog; }
   get analyticsSnapshot() { return this._db.analyticsSnapshot; }
 
+  // maxWait/timeout above Prisma's 2s/5s defaults: advisory-lock-serialized transactions
+  // (e.g. ticket-number generation) can legitimately queue behind each other under real
+  // concurrent load against a remote DB, and the default timeout is too tight for that queueing.
   $transaction<T>(fn: (tx: PrismaInstance) => Promise<T>): Promise<T> {
-    return this._db.$transaction(fn as any) as Promise<T>;
+    return this._db.$transaction(fn as any, { maxWait: 10000, timeout: 15000 }) as Promise<T>;
   }
 
   async onModuleInit() {

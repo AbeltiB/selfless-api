@@ -1,12 +1,19 @@
 import 'dotenv/config';
 import { PrismaClient } from '../generated/prisma/client.js';
 import { PrismaPg } from '@prisma/adapter-pg';
-import * as bcrypt from 'bcrypt';
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
 const prisma = new PrismaClient({ adapter }) as any;
 
 async function main() {
+  const superAdminPhone = process.env.SEED_SUPER_ADMIN_PHONE;
+  if (!superAdminPhone) {
+    throw new Error(
+      'SEED_SUPER_ADMIN_PHONE is not set. Add it to selfless-api/.env (e.g. SEED_SUPER_ADMIN_PHONE="+2519XXXXXXXX") before running the seed.',
+    );
+  }
+  const demoOfficerPhone = process.env.SEED_DEMO_OFFICER_PHONE || '+251911000002';
+
   // ── Default Organization ──────────────────────────────────────────────────
   const org = await prisma.organization.upsert({
     where: { code: 'SELFLESS' },
@@ -15,23 +22,30 @@ async function main() {
   });
   console.log(`Org: ${org.name}`);
 
-  // ── Super Admin ───────────────────────────────────────────────────────────
-  const hash = await bcrypt.hash('Admin@123', 12);
-  await prisma.user.upsert({
-    where: { email: 'admin@selfless.io' },
+  // ── Super Admin (no PIN set — first login goes through the normal ────────
+  // ── OTP + set-pin flow so the real owner of this phone chooses their PIN) ─
+  const superAdmin = await prisma.account.upsert({
+    where: { phone: superAdminPhone },
     update: {},
     create: {
-      email: 'admin@selfless.io',
-      passwordHash: hash,
-      name: 'System Admin',
-      firstName: 'System',
+      phone: superAdminPhone,
+      firstName: 'Super',
       lastName: 'Admin',
-      role: 'SUPER_ADMIN',
+      status: 'ACTIVE',
+    },
+  });
+  await prisma.orgMembership.upsert({
+    where: { accountId_organizationId: { accountId: superAdmin.id, organizationId: org.id } },
+    update: {},
+    create: {
+      accountId: superAdmin.id,
       organizationId: org.id,
+      branchId: null,
+      role: 'SUPER_ADMIN',
       isActive: true,
     },
   });
-  console.log('Admin: admin@selfless.io / Admin@123');
+  console.log(`Super admin seeded: ${superAdminPhone} (no PIN yet — sign up via /auth/request-otp to set one)`);
 
   // ── Demo Branch ───────────────────────────────────────────────────────────
   const branch = await prisma.branch.upsert({
@@ -124,24 +138,52 @@ async function main() {
   }
   console.log('Counters: Desk 1-3');
 
-  // ── Demo Officer ──────────────────────────────────────────────────────────
-  const officerHash = await bcrypt.hash('Officer@123', 12);
-  await prisma.user.upsert({
-    where: { email: 'officer@selfless.io' },
+  // ── Demo Priority Flags ───────────────────────────────────────────────────
+  await prisma.priorityFlag.upsert({
+    where: { organizationId_name: { organizationId: org.id, name: 'Elderly' } },
+    update: {},
+    create: { organizationId: org.id, name: 'Elderly', description: 'Age 65+', weight: 50, color: '#B5701F', isActive: true },
+  });
+  await prisma.priorityFlag.upsert({
+    where: { organizationId_name: { organizationId: org.id, name: 'Pregnant' } },
+    update: {},
+    create: { organizationId: org.id, name: 'Pregnant', weight: 50, color: '#8A4FA6', isActive: true },
+  });
+  await prisma.priorityFlag.upsert({
+    where: { organizationId_name: { organizationId: org.id, name: 'Disability' } },
+    update: {},
+    create: { organizationId: org.id, name: 'Disability', weight: 50, color: '#2E5C8A', isActive: true },
+  });
+  await prisma.priorityFlag.upsert({
+    where: { organizationId_name: { organizationId: org.id, name: 'Emergency' } },
+    update: {},
+    create: { organizationId: org.id, name: 'Emergency', description: 'One-off, staff-assigned', weight: 100, color: '#B23A32', isActive: true },
+  });
+  console.log('Priority flags: Elderly, Pregnant, Disability, Emergency');
+
+  // ── Demo Officer (also no PIN — signs up the same way) ────────────────────
+  const officer = await prisma.account.upsert({
+    where: { phone: demoOfficerPhone },
     update: {},
     create: {
-      email: 'officer@selfless.io',
-      passwordHash: officerHash,
-      name: 'Demo Officer',
+      phone: demoOfficerPhone,
       firstName: 'Demo',
       lastName: 'Officer',
-      role: 'OFFICER',
+      status: 'ACTIVE',
+    },
+  });
+  await prisma.orgMembership.upsert({
+    where: { accountId_organizationId: { accountId: officer.id, organizationId: org.id } },
+    update: {},
+    create: {
+      accountId: officer.id,
       organizationId: org.id,
       branchId: branch.id,
+      role: 'OFFICER',
       isActive: true,
     },
   });
-  console.log('Officer: officer@selfless.io / Officer@123');
+  console.log(`Officer seeded: ${demoOfficerPhone} (no PIN yet)`);
 
   console.log('\n✅ Seed complete');
 }

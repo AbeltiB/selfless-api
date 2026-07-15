@@ -1,182 +1,228 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
+import { OtpPurpose } from 'selfless-sdk';
 import { PrismaService } from '../../prisma/prisma.service.js';
-import { UserRole, type TelegramAuthData } from 'selfless-sdk';
+import { requireEnv } from '../../common/utils/require-env.util.js';
+import { OtpService } from './otp.service.js';
+import { PinService } from './pin.service.js';
+import { DeviceTrustService } from './device-trust.service.js';
+
+const ACCESS_TOKEN_TTL = '15m';
+const REFRESH_TOKEN_TTL_DAYS = 10;
+const SESSION_STALE_DAYS = 10;
+
+interface ActiveContext {
+  activeOrgId?: string;
+  activeBranchId?: string;
+  activeRole?: string;
+}
+
+interface RequestMeta {
+  userAgent?: string;
+  ip?: string;
+}
 
 @Injectable()
 export class AuthService {
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
+    private otp: OtpService,
+    private pin: PinService,
+    private deviceTrust: DeviceTrustService,
   ) {}
 
-  // ── Staff / Admin (email + password) ─────────────────────────────────────
+  // ── OTP passthrough (rate limiting lives at the controller via @Throttle) ──
 
-  async validateStaff(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
-    if (!user || !user.isActive || !user.passwordHash) return null;
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return null;
-    await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-    return user;
+  requestOtp(phone: string, purpose: OtpPurpose, requestIp?: string) {
+    return this.otp.requestOtp(phone, purpose, requestIp);
   }
 
-  async loginStaff(user: any) {
-    const payload = {
-      sub: user.id,
-      email: user.email,
-      role: user.role,
-      organizationId: user.organizationId ?? undefined,
-      branchId: user.branchId ?? undefined,
-      type: 'staff',
-    };
-    return {
-      accessToken: this.jwtService.sign(payload, { expiresIn: '15m' }),
-      refreshToken: this.jwtService.sign(
-        { sub: user.id, type: 'staff-refresh' },
-        { secret: process.env.JWT_REFRESH_SECRET || 'refresh-dev-secret', expiresIn: '7d' },
-      ),
-      user: this.sanitizeUser(user),
-    };
+  verifyOtp(phone: string, purpose: OtpPurpose, code: string) {
+    return this.otp.verifyOtp(phone, purpose, code);
   }
 
-  async refreshStaff(refreshToken: string) {
+  // ── Signup completion (first OTP verify → set PIN + profile) ─────────────
+
+  async setPin(otpToken: string, pin: string, firstName: string, lastName: string | undefined, email: string | undefined, meta: RequestMeta) {
+    const phone = this.otp.verifyOtpToken(otpToken, OtpPurpose.SIGNUP);
+    const pinHash = await this.pin.hashPin(pin);
+
+    let account = await this.prisma.account.findUnique({ where: { phone } });
+    if (account?.pinHash) {
+      throw new ConflictException('This phone number already has an account. Use login instead.');
+    }
+
+    account = account
+      ? await this.prisma.account.update({
+          where: { id: account.id },
+          data: { pinHash, firstName, lastName, email, lastLoginAt: new Date() },
+        })
+      : await this.prisma.account.create({
+          data: { phone, firstName, lastName, email, pinHash, lastLoginAt: new Date() },
+        });
+
+    return this.issueSession(account.id, meta);
+  }
+
+  // ── Login (phone + PIN, OTP only when device/session is untrusted/stale) ──
+
+  async login(phone: string, pinCode: string, otpToken: string | undefined, rawDeviceToken: string | undefined, meta: RequestMeta) {
+    const account = await this.prisma.account.findUnique({ where: { phone } });
+    if (!account) throw new UnauthorizedException('Invalid phone number or PIN.');
+
+    await this.pin.verifyPin(account, pinCode);
+
+    const trustedDeviceId = await this.deviceTrust.verifyDevice(account.id, rawDeviceToken);
+    const sessionFresh = !!account.lastLoginAt && Date.now() - account.lastLoginAt.getTime() < SESSION_STALE_DAYS * 24 * 60 * 60 * 1000;
+
+    if (trustedDeviceId && sessionFresh) {
+      await this.prisma.account.update({ where: { id: account.id }, data: { lastLoginAt: new Date() } });
+      const ctx = await this.resolveDefaultActiveContext(account.id);
+      return { otpRequired: false as const, ...(await this.signTokens(account.id, trustedDeviceId, ctx)), account: this.sanitizeAccount(account) };
+    }
+
+    if (!otpToken) {
+      return { otpRequired: true as const, purpose: OtpPurpose.LOGIN };
+    }
+
+    const verifiedPhone = this.otp.verifyOtpToken(otpToken, OtpPurpose.LOGIN);
+    if (verifiedPhone !== phone) throw new UnauthorizedException('OTP does not match this phone number.');
+
+    await this.prisma.account.update({ where: { id: account.id }, data: { lastLoginAt: new Date() } });
+    const session = await this.issueSession(account.id, meta);
+    return { otpRequired: false as const, ...session };
+  }
+
+  // ── PIN reset (OTP-gated, revokes all trusted devices) ───────────────────
+
+  async resetPin(otpToken: string, newPin: string, meta: RequestMeta) {
+    const phone = this.otp.verifyOtpToken(otpToken, OtpPurpose.PIN_RESET);
+    const account = await this.prisma.account.findUnique({ where: { phone } });
+    if (!account) throw new UnauthorizedException('Account not found.');
+
+    const pinHash = await this.pin.hashPin(newPin);
+    await this.prisma.account.update({
+      where: { id: account.id },
+      data: { pinHash, pinFailedAttempts: 0, pinLockedUntil: null },
+    });
+    await this.deviceTrust.revokeAllForAccount(account.id);
+
+    return this.issueSession(account.id, meta);
+  }
+
+  // ── Refresh (re-verifies active org membership against the DB) ───────────
+
+  async refresh(refreshToken: string) {
+    let payload: { sub: string; deviceId?: string; activeOrgId?: string; type: string };
     try {
-      const payload = this.jwtService.verify(refreshToken, {
-        secret: process.env.JWT_REFRESH_SECRET || 'refresh-dev-secret',
-      });
-      if (payload.type !== 'staff-refresh') throw new UnauthorizedException();
-      const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
-      if (!user || !user.isActive) throw new UnauthorizedException();
-      const newPayload = { sub: user.id, email: user.email, role: user.role, organizationId: user.organizationId, branchId: user.branchId, type: 'staff' };
-      return { accessToken: this.jwtService.sign(newPayload, { expiresIn: '15m' }) };
+      payload = this.jwtService.verify(refreshToken, { secret: requireEnv('JWT_REFRESH_SECRET') });
     } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
-  }
+    if (payload.type !== 'account-refresh') throw new UnauthorizedException('Invalid refresh token');
 
-  async getMe(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      include: {
-        branch: { select: { id: true, name: true, code: true } },
-        organization: { select: { id: true, name: true, code: true } },
-      },
-    });
-    if (!user) throw new UnauthorizedException();
-    return this.sanitizeUser(user);
-  }
+    const account = await this.prisma.account.findUnique({ where: { id: payload.sub } });
+    if (!account || account.status !== 'ACTIVE') throw new UnauthorizedException('Account not found or inactive');
 
-  // ── Unified Telegram login (staff takes priority over customer) ──────────
-
-  async loginViaTelegram(data: TelegramAuthData): Promise<
-    { accountType: 'staff'; tokens: Awaited<ReturnType<AuthService['loginStaff']>>; user: any } |
-    { accountType: 'customer'; tokens: Awaited<ReturnType<AuthService['loginCustomer']>>; customer: any }
-  > {
-    const telegramId = String(data.id);
-
-    // Check User (staff) table first
-    const staffUser = await this.prisma.user.findFirst({ where: { telegramId } });
-    if (staffUser) {
-      await this.prisma.user.update({
-        where: { id: staffUser.id },
-        data: { telegramUsername: data.username ?? null, lastLoginAt: new Date() },
+    let ctx: ActiveContext = {};
+    if (payload.activeOrgId) {
+      const membership = await this.prisma.orgMembership.findUnique({
+        where: { accountId_organizationId: { accountId: account.id, organizationId: payload.activeOrgId } },
       });
-      const tokens = await this.loginStaff(staffUser);
-      return { accountType: 'staff', tokens, user: tokens.user };
+      if (membership?.isActive) {
+        ctx = { activeOrgId: membership.organizationId, activeBranchId: membership.branchId ?? undefined, activeRole: membership.role };
+      }
+      // else: membership was revoked since the refresh token was issued — silently drop org context, forcing a fresh switch-org.
     }
 
-    // Fall through to customer
-    const customer = await this.findOrCreateCustomer(data);
-    const tokens = await this.loginCustomer(customer);
-    return { accountType: 'customer', tokens, customer };
+    const accessToken = this.signAccessToken(account.id, account.phone, payload.deviceId, ctx);
+    return { accessToken, activeOrgId: ctx.activeOrgId, activeBranchId: ctx.activeBranchId, activeRole: ctx.activeRole };
   }
 
-  async linkEmail(userId: string, email: string, password: string) {
-    const existing = await this.prisma.user.findFirst({ where: { email, id: { not: userId } } });
-    if (existing) throw new Error('Email already in use');
-    const passwordHash = await bcrypt.hash(password, 12);
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { email, passwordHash },
+  // ── Switch active organization (always re-verified against the DB) ───────
+
+  async switchOrg(accountId: string, organizationId: string, deviceId: string | undefined) {
+    const membership = await this.prisma.orgMembership.findUnique({
+      where: { accountId_organizationId: { accountId, organizationId } },
     });
-    return this.sanitizeUser(user);
-  }
-
-  async linkTelegram(userId: string, telegramData: TelegramAuthData) {
-    const telegramId = String(telegramData.id);
-    const existing = await this.prisma.user.findFirst({ where: { telegramId, id: { not: userId } } });
-    if (existing) throw new Error('Telegram account already linked to another user');
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: { telegramId, telegramUsername: telegramData.username ?? null },
-    });
-    return this.sanitizeUser(user);
-  }
-
-  // ── Customer (Telegram) ───────────────────────────────────────────────────
-
-  async findOrCreateCustomer(data: TelegramAuthData) {
-    const existing = await this.prisma.customer.findUnique({ where: { telegramId: String(data.id) } });
-    if (existing) {
-      return this.prisma.customer.update({
-        where: { id: existing.id },
-        data: { telegramUsername: data.username ?? null, photoUrl: data.photo_url ?? null },
-      });
+    if (!membership || !membership.isActive) {
+      throw new ForbiddenException('No active membership in that organization.');
     }
-    return this.prisma.customer.create({
-      data: {
-        telegramId: String(data.id),
-        telegramUsername: data.username ?? null,
-        firstName: data.first_name,
-        lastName: data.last_name ?? null,
-        photoUrl: data.photo_url ?? null,
-        profileComplete: false,
-      },
-    });
+    const account = await this.prisma.account.findUniqueOrThrow({ where: { id: accountId } });
+    const ctx: ActiveContext = { activeOrgId: membership.organizationId, activeBranchId: membership.branchId ?? undefined, activeRole: membership.role };
+    return this.signTokens(accountId, deviceId, ctx, account.phone);
   }
 
-  async loginCustomer(customer: any) {
-    const payload = { sub: customer.id, telegramId: customer.telegramId, type: 'customer' };
+  // ── Me ─────────────────────────────────────────────────────────────────
+
+  async getMe(accountId: string) {
+    const account = await this.prisma.account.findUnique({
+      where: { id: accountId },
+      include: { memberships: { where: { isActive: true }, include: { organization: true, branch: true } } },
+    });
+    if (!account) throw new UnauthorizedException();
+    return this.sanitizeAccount(account);
+  }
+
+  // ── Logout ─────────────────────────────────────────────────────────────
+
+  async logout(deviceId: string | undefined, revokeDevice: boolean) {
+    if (revokeDevice && deviceId) {
+      await this.deviceTrust.revokeDevice(deviceId);
+    }
+  }
+
+  // ── Internals ──────────────────────────────────────────────────────────
+
+  private async issueSession(accountId: string, meta: RequestMeta) {
+    const rawDeviceToken = await this.deviceTrust.issueDevice(accountId, meta);
+    const device = await this.prisma.trustedDevice.findFirst({ where: { accountId }, orderBy: { createdAt: 'desc' } });
+    const account = await this.prisma.account.findUniqueOrThrow({ where: { id: accountId } });
+    const ctx = await this.resolveDefaultActiveContext(accountId);
+    const tokens = await this.signTokens(accountId, device!.id, ctx, account.phone);
+    return { ...tokens, deviceToken: rawDeviceToken, account: this.sanitizeAccount(account) };
+  }
+
+  /** If the account has exactly one active org membership, pre-select it; otherwise leave org context unset. */
+  private async resolveDefaultActiveContext(accountId: string): Promise<ActiveContext> {
+    const memberships = await this.prisma.orgMembership.findMany({ where: { accountId, isActive: true } });
+    if (memberships.length === 1) {
+      const m = memberships[0];
+      return { activeOrgId: m.organizationId, activeBranchId: m.branchId ?? undefined, activeRole: m.role };
+    }
+    return {};
+  }
+
+  private signAccessToken(accountId: string, phone: string, deviceId: string | undefined, ctx: ActiveContext) {
+    return this.jwtService.sign(
+      { sub: accountId, phone, deviceId, ...ctx, type: 'account' },
+      { secret: requireEnv('JWT_SECRET'), expiresIn: ACCESS_TOKEN_TTL },
+    );
+  }
+
+  private signRefreshToken(accountId: string, deviceId: string | undefined, ctx: ActiveContext) {
+    return this.jwtService.sign(
+      { sub: accountId, deviceId, activeOrgId: ctx.activeOrgId, type: 'account-refresh' },
+      { secret: requireEnv('JWT_REFRESH_SECRET'), expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` },
+    );
+  }
+
+  private async signTokens(accountId: string, deviceId: string | undefined, ctx: ActiveContext, phone?: string) {
+    const accountPhone = phone ?? (await this.prisma.account.findUniqueOrThrow({ where: { id: accountId } })).phone;
     return {
-      accessToken: this.jwtService.sign(payload, { expiresIn: '15m' }),
-      refreshToken: this.jwtService.sign(
-        { sub: customer.id, type: 'customer-refresh' },
-        { secret: process.env.JWT_REFRESH_SECRET || 'refresh-dev-secret', expiresIn: '30d' },
-      ),
-      customer,
-      profileCompletion: { phoneRequired: !customer.phone, emailRequired: false },
+      accessToken: this.signAccessToken(accountId, accountPhone, deviceId, ctx),
+      refreshToken: this.signRefreshToken(accountId, deviceId, ctx),
+      // Exposed alongside the (opaque) tokens so the frontend never needs to decode the JWT
+      // itself just to know which org/role is active.
+      activeOrgId: ctx.activeOrgId,
+      activeBranchId: ctx.activeBranchId,
+      activeRole: ctx.activeRole,
     };
   }
 
-  async refreshCustomer(refreshToken: string) {
-    try {
-      const payload = this.jwtService.verify(refreshToken, {
-        secret: process.env.JWT_REFRESH_SECRET || 'refresh-dev-secret',
-      });
-      if (payload.type !== 'customer-refresh') throw new UnauthorizedException();
-      const customer = await this.prisma.customer.findUnique({ where: { id: payload.sub } });
-      if (!customer) throw new UnauthorizedException();
-      return { accessToken: this.jwtService.sign({ sub: customer.id, telegramId: customer.telegramId, type: 'customer' }, { expiresIn: '15m' }) };
-    } catch {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-  }
-
-  // ── Seed ──────────────────────────────────────────────────────────────────
-
-  async seedAdmin() {
-    const count = await this.prisma.user.count({ where: { role: UserRole.SUPER_ADMIN } });
-    if (count > 0) return;
-    const hash = await bcrypt.hash('Admin@123', 12);
-    await this.prisma.user.create({
-      data: { email: 'admin@selfless.io', passwordHash: hash, name: 'System Admin', role: UserRole.SUPER_ADMIN },
-    });
-  }
-
-  private sanitizeUser(user: any) {
-    const { passwordHash: _, ...safe } = user;
+  private sanitizeAccount(account: any) {
+    const { pinHash: _p, pinFailedAttempts: _f, pinLockedUntil: _l, ...safe } = account;
     return safe;
   }
 }

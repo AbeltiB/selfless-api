@@ -1,9 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { RealtimeGateway } from '../realtime/realtime.gateway.js';
 import { TicketsService } from '../tickets/tickets.service.js';
 import { QueueStatus, TicketStatus, SOCKET_EVENTS } from 'selfless-sdk';
+import { OpenQueueDto } from './dto/queue.dto.js';
+import { getBranchDayStart } from '../../common/utils/branch-time.util.js';
 
 @Injectable()
 export class QueuesService {
@@ -14,11 +16,12 @@ export class QueuesService {
     private tickets: TicketsService,
   ) {}
 
-  async findAll(filter: { branchId?: string; serviceId?: string; stepId?: string; date?: string }) {
+  async findAll(filter: { branchId?: string; serviceId?: string; stepId?: string; date?: string }, scopeOrgId?: string) {
     const where: any = {};
     if (filter.branchId) where.branchId = filter.branchId;
     if (filter.serviceId) where.serviceId = filter.serviceId;
     if (filter.stepId) where.stepId = filter.stepId;
+    if (scopeOrgId) where.branch = { organizationId: scopeOrgId };
     if (filter.date) {
       const d = new Date(filter.date); d.setHours(0, 0, 0, 0);
       const d2 = new Date(filter.date); d2.setHours(23, 59, 59, 999);
@@ -48,11 +51,14 @@ export class QueuesService {
     return q;
   }
 
-  async open(dto: { branchId: string; serviceId: string; stepId?: string }) {
-    const service = await this.prisma.service.findUnique({ where: { id: dto.serviceId } });
+  async open(dto: OpenQueueDto, scopeOrgId?: string) {
+    const service = await this.prisma.service.findUnique({ where: { id: dto.serviceId }, include: { branch: true } });
     if (!service) throw new NotFoundException('Service not found');
+    if (scopeOrgId && (service.branch.organizationId !== scopeOrgId || dto.branchId !== service.branchId)) {
+      throw new ForbiddenException('That branch/service does not belong to your organization.');
+    }
 
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayStart = getBranchDayStart(service.branch.timezone);
     const existing = await this.prisma.queue.findFirst({
       where: { branchId: dto.branchId, serviceId: dto.serviceId, ...(dto.stepId ? { stepId: dto.stepId } : {}), date: { gte: todayStart } },
     });
@@ -69,8 +75,12 @@ export class QueuesService {
     return queue;
   }
 
-  async updateStatus(id: string, status: QueueStatus) {
+  async updateStatus(id: string, status: QueueStatus, scopeOrgId?: string) {
     const queue = await this.findOne(id);
+    if (scopeOrgId) {
+      const branch = await this.prisma.branch.findUnique({ where: { id: queue.branchId } });
+      if (!branch || branch.organizationId !== scopeOrgId) throw new NotFoundException('Queue not found');
+    }
     if (queue.status === status) return queue;
 
     const data: any = { status };
@@ -88,15 +98,21 @@ export class QueuesService {
     return updated;
   }
 
-  async callNext(queueId: string, operatorId: string, counterId?: string) {
+  async callNext(queueId: string, operatorId: string, counterId?: string, scopeOrgId?: string) {
+    if (scopeOrgId) {
+      const queue = await this.findOne(queueId);
+      const branch = await this.prisma.branch.findUnique({ where: { id: queue.branchId } });
+      if (!branch || branch.organizationId !== scopeOrgId) throw new NotFoundException('Queue not found');
+    }
     return this.tickets.callNext(queueId, operatorId, counterId);
   }
 
   async getStats(queueId: string) {
     const queue = await this.findOne(queueId);
+    const todayStart = getBranchDayStart(queue.branch.timezone);
     const tickets = await this.prisma.ticket.groupBy({
       by: ['status'],
-      where: { branchId: queue.branchId, serviceId: queue.serviceId, ...(queue.stepId ? { currentStepId: queue.stepId } : {}), issuedAt: { gte: new Date(new Date().setHours(0,0,0,0)) } },
+      where: { branchId: queue.branchId, serviceId: queue.serviceId, ...(queue.stepId ? { currentStepId: queue.stepId } : {}), issuedAt: { gte: todayStart } },
       _count: { status: true },
     });
 
@@ -104,7 +120,7 @@ export class QueuesService {
     for (const t of tickets) counts[t.status] = t._count.status;
 
     const served = await this.prisma.ticket.findMany({
-      where: { branchId: queue.branchId, serviceId: queue.serviceId, status: TicketStatus.COMPLETED, waitSeconds: { not: null }, issuedAt: { gte: new Date(new Date().setHours(0,0,0,0)) } },
+      where: { branchId: queue.branchId, serviceId: queue.serviceId, status: TicketStatus.COMPLETED, waitSeconds: { not: null }, issuedAt: { gte: todayStart } },
       select: { waitSeconds: true },
     });
     const avgWait = served.length ? Math.round(served.reduce((s, t) => s + (t.waitSeconds ?? 0), 0) / served.length) : 0;

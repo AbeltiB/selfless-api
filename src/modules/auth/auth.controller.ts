@@ -1,135 +1,135 @@
-import { Controller, Post, Get, Patch, Body, Req, Res, UseGuards, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
+import { Controller, Post, Get, Body, Req, Res, HttpCode, HttpStatus } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Public } from '../../common/decorators/public.decorator.js';
-import { verifyTelegramAuth, type TelegramAuthData } from 'selfless-sdk';
+import { AnyAccount } from '../../common/decorators/any-account.decorator.js';
+import { RequestOtpDto } from './dto/request-otp.dto.js';
+import { VerifyOtpDto } from './dto/verify-otp.dto.js';
+import { SetPinDto } from './dto/set-pin.dto.js';
+import { LoginDto } from './dto/login.dto.js';
+import { ResetPinDto } from './dto/reset-pin.dto.js';
+import { SwitchOrgDto } from './dto/switch-org.dto.js';
+import { LogoutDto } from './dto/logout.dto.js';
 
-const REFRESH_COOKIE_OPTS = (secure: boolean) => ({
-  httpOnly: true,
-  secure,
-  sameSite: 'lax' as const,
-  path: '/api/v1/auth',
-});
+const REFRESH_COOKIE = 'refreshToken';
+const DEVICE_COOKIE = 'selfless_device';
+const COOKIE_PATH = '/api/v1/auth';
+
+function cookieOpts(secure: boolean, maxAgeMs: number) {
+  return { httpOnly: true, secure, sameSite: 'lax' as const, path: COOKIE_PATH, maxAge: maxAgeMs };
+}
 
 @Controller('auth')
 export class AuthController {
   constructor(private auth: AuthService) {}
 
-  // ── Staff / Admin login ──────────────────────────────────────────────────
+  private isProd() {
+    return process.env.NODE_ENV === 'production';
+  }
+
+  private setSessionCookies(res: Response, refreshToken: string, deviceToken?: string) {
+    (res as any).cookie(REFRESH_COOKIE, refreshToken, cookieOpts(this.isProd(), 10 * 24 * 60 * 60 * 1000));
+    if (deviceToken) {
+      (res as any).cookie(DEVICE_COOKIE, deviceToken, cookieOpts(this.isProd(), 60 * 24 * 60 * 60 * 1000));
+    }
+  }
 
   @Public()
-  @UseGuards(AuthGuard('local'))
+  @Post('request-otp')
+  @HttpCode(HttpStatus.OK)
+  async requestOtp(@Body() dto: RequestOtpDto, @Req() req: Request) {
+    const data = await this.auth.requestOtp(dto.phone, dto.purpose, req.ip);
+    return { success: true, data };
+  }
+
+  @Public()
+  @Post('verify-otp')
+  @HttpCode(HttpStatus.OK)
+  async verifyOtp(@Body() dto: VerifyOtpDto) {
+    const data = await this.auth.verifyOtp(dto.phone, dto.purpose, dto.code);
+    return { success: true, data };
+  }
+
+  @Public()
+  @Post('set-pin')
+  @HttpCode(HttpStatus.OK)
+  async setPin(@Body() dto: SetPinDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const { accessToken, refreshToken, deviceToken, account, activeOrgId, activeBranchId, activeRole } = await this.auth.setPin(
+      dto.otpToken,
+      dto.pin,
+      dto.firstName,
+      dto.lastName,
+      dto.email,
+      { userAgent: req.headers['user-agent'], ip: req.ip },
+    );
+    this.setSessionCookies(res, refreshToken, deviceToken);
+    return { success: true, data: { accessToken, account, activeOrgId, activeBranchId, activeRole, deviceTrusted: true } };
+  }
+
+  @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async loginStaff(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const { accessToken, refreshToken, user } = await this.auth.loginStaff((req as any).user);
-    (res as any).cookie('refreshToken', refreshToken, {
-      ...REFRESH_COOKIE_OPTS(process.env.NODE_ENV === 'production'),
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+  async login(@Body() dto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const rawDeviceToken = (req as any).cookies?.[DEVICE_COOKIE];
+    const result = await this.auth.login(dto.phone, dto.pin, dto.otpToken, rawDeviceToken, {
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
     });
-    return { success: true, data: { accessToken, user } };
-  }
 
-  // ── Unified Telegram login (staff or customer) ───────────────────────────
-
-  @Public()
-  @UseGuards(AuthGuard('telegram'))
-  @Post('telegram')
-  @HttpCode(HttpStatus.OK)
-  async loginTelegram(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const result = (req as any).user as Awaited<ReturnType<AuthService['loginViaTelegram']>>;
-
-    if (result.accountType === 'staff') {
-      const { accessToken, refreshToken } = result.tokens;
-      (res as any).cookie('refreshToken', refreshToken, {
-        ...REFRESH_COOKIE_OPTS(process.env.NODE_ENV === 'production'),
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-      return { success: true, data: { accountType: 'staff', accessToken, user: result.user } };
+    if (result.otpRequired) {
+      return { success: true, data: { otpRequired: true, purpose: result.purpose } };
     }
 
-    const { accessToken, refreshToken, profileCompletion } = result.tokens;
-    (res as any).cookie('refreshToken', refreshToken, {
-      ...REFRESH_COOKIE_OPTS(process.env.NODE_ENV === 'production'),
-      maxAge: 30 * 24 * 60 * 60 * 1000,
+    const { accessToken, refreshToken, deviceToken, account, activeOrgId, activeBranchId, activeRole } = result as any;
+    this.setSessionCookies(res, refreshToken, deviceToken);
+    return { success: true, data: { accessToken, account, activeOrgId, activeBranchId, activeRole, otpRequired: false } };
+  }
+
+  @Public()
+  @Post('reset-pin')
+  @HttpCode(HttpStatus.OK)
+  async resetPin(@Body() dto: ResetPinDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const { accessToken, refreshToken, deviceToken, account, activeOrgId, activeBranchId, activeRole } = await this.auth.resetPin(dto.otpToken, dto.newPin, {
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
     });
-    return { success: true, data: { accountType: 'customer', accessToken, customer: result.customer, profileCompletion } };
+    this.setSessionCookies(res, refreshToken, deviceToken);
+    return { success: true, data: { accessToken, account, activeOrgId, activeBranchId, activeRole } };
   }
-
-  // ── Link email+password to staff account ────────────────────────────────
-
-  @Patch('link-email')
-  @HttpCode(HttpStatus.OK)
-  async linkEmail(
-    @CurrentUser() user: any,
-    @Body() body: { email: string; password: string },
-  ) {
-    if (user.type !== 'staff') throw new BadRequestException('Staff accounts only');
-    if (!body.email || !body.password) throw new BadRequestException('email and password required');
-    const updated = await this.auth.linkEmail(user.sub, body.email, body.password);
-    return { success: true, data: updated };
-  }
-
-  // ── Link Telegram to existing staff account ──────────────────────────────
-
-  @Patch('link-telegram')
-  @HttpCode(HttpStatus.OK)
-  async linkTelegram(
-    @CurrentUser() user: any,
-    @Body() body: TelegramAuthData,
-  ) {
-    if (user.type !== 'staff') throw new BadRequestException('Staff accounts only');
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (!token) throw new BadRequestException('Telegram not configured');
-    if (!verifyTelegramAuth(body, token)) throw new BadRequestException('Invalid Telegram auth data');
-    const updated = await this.auth.linkTelegram(user.sub, body);
-    return { success: true, data: updated };
-  }
-
-  // ── Refresh (handles both staff and customer) ────────────────────────────
 
   @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  async refresh(@Req() req: Request, @Body() body: any) {
-    const token = (req as any).cookies?.['refreshToken'] || body.refreshToken;
-    if (!token) throw new Error('No refresh token');
-
-    try {
-      const data = await this.auth.refreshStaff(token);
-      return { success: true, data };
-    } catch {
-      const data = await this.auth.refreshCustomer(token);
-      return { success: true, data };
-    }
+  async refresh(@Req() req: Request, @Body() body: { refreshToken?: string }) {
+    const token = (req as any).cookies?.[REFRESH_COOKIE] || body.refreshToken;
+    if (!token) return { success: false, message: 'No refresh token' };
+    const data = await this.auth.refresh(token);
+    return { success: true, data };
   }
 
-  // ── Profile completion ───────────────────────────────────────────────────
-
-  @Patch('complete-profile')
+  @AnyAccount()
+  @Post('switch-org')
   @HttpCode(HttpStatus.OK)
-  async completeProfile(@CurrentUser() user: any, @Body() body: { phone?: string; email?: string }) {
-    if (!user.telegramId) throw new Error('Not a customer session');
-    // Import lazily to avoid circular dep
-    const { PrismaService } = await import('../../prisma/prisma.service.js');
-    // For now handled via customers module — this is a convenience alias
-    return { success: true, message: 'Use PATCH /customers/me to update your profile' };
+  async switchOrg(@Body() dto: SwitchOrgDto, @CurrentUser() user: any, @Res({ passthrough: true }) res: Response) {
+    const { accessToken, refreshToken, activeOrgId, activeBranchId, activeRole } = await this.auth.switchOrg(user.id, dto.organizationId, user.deviceId);
+    this.setSessionCookies(res, refreshToken);
+    return { success: true, data: { accessToken, activeOrgId, activeBranchId, activeRole } };
   }
 
-  @Post('logout')
-  @HttpCode(HttpStatus.OK)
-  async logout(@Res({ passthrough: true }) res: Response) {
-    (res as any).clearCookie('refreshToken', { path: '/api/v1/auth' });
-    return { success: true };
-  }
-
+  @AnyAccount()
   @Get('me')
   async me(@CurrentUser() user: any) {
-    if (user.type === 'customer' || user.telegramId) {
-      return { success: true, data: { type: 'customer', ...user } };
-    }
-    return { success: true, data: await this.auth.getMe(user.sub) };
+    return { success: true, data: await this.auth.getMe(user.id) };
+  }
+
+  @AnyAccount()
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  async logout(@Body() dto: LogoutDto, @CurrentUser() user: any, @Res({ passthrough: true }) res: Response) {
+    await this.auth.logout(user.deviceId, !!dto.revokeDevice);
+    (res as any).clearCookie(REFRESH_COOKIE, { path: COOKIE_PATH });
+    if (dto.revokeDevice) (res as any).clearCookie(DEVICE_COOKIE, { path: COOKIE_PATH });
+    return { success: true };
   }
 }

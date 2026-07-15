@@ -27,7 +27,19 @@ enum UserRole {
   BRANCH_MANAGER
   SUPERVISOR
   OFFICER
-  CUSTOMER
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum OtpPurpose {
+  SIGNUP
+  LOGIN
+  PIN_RESET
+  DEVICE_TRUST
 }
 
 enum TicketStatus {
@@ -139,13 +151,13 @@ model Organization {
   updatedAt DateTime  @updatedAt
 
   branches           Branch[]
-  users              User[]
-  customers          Customer[]
+  memberships        OrgMembership[]
   workflows          Workflow[]
   counterGroups      CounterGroup[]
   tickets            Ticket[]
   appointments       Appointment[]
   analyticsSnapshots AnalyticsSnapshot[]
+  priorityFlags      PriorityFlag[]
 }
 
 // ─── Branch ───────────────────────────────────────────────────────────────────
@@ -168,7 +180,7 @@ model Branch {
 
   services           Service[]
   counters           Counter[]
-  users              User[]             @relation("UserBranch")
+  memberships        OrgMembership[]      @relation("MembershipBranch")
   queues             Queue[]
   tickets            Ticket[]
   appointments       Appointment[]
@@ -328,56 +340,144 @@ model FormField {
   createdAt  DateTime  @default(now())
 }
 
-// ─── User (Staff / Admin — dual auth) ────────────────────────────────────────
+// ─── Account (unified identity — phone + OTP + PIN) ──────────────────────────
 
-model User {
-  id             String        @id @default(uuid())
-  organizationId String?
-  organization   Organization? @relation(fields: [organizationId], references: [id])
-  branchId       String?
-  branch         Branch?       @relation("UserBranch", fields: [branchId], references: [id])
+model Account {
+  id                String        @id @default(uuid())
 
-  email            String?  @unique
-  passwordHash     String?
-  telegramId       String?  @unique
-  telegramUsername String?
+  phone             String        @unique
+  pinHash           String?
+  pinFailedAttempts Int           @default(0)
+  pinLockedUntil    DateTime?
 
-  firstName   String?
-  lastName    String?
-  name        String?
-  role        UserRole  @default(OFFICER)
-  isActive    Boolean   @default(true)
-  invitedAt   DateTime?
-  lastLoginAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  firstName         String
+  lastName          String?
+  email             String?
+  telegramId        String?       @unique
+  telegramUsername  String?
+  photoUrl          String?
 
-  operatedTickets Ticket[]     @relation("TicketOperator")
-  ticketEvents    TicketEvent[]
+  addressLine1      String?
+  addressLine2      String?
+  city              String?
+  region            String?
+  country           String?
+  dateOfBirth       DateTime?
+
+  status            AccountStatus @default(ACTIVE)
+  lastLoginAt       DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  memberships       OrgMembership[]
+  trustedDevices    TrustedDevice[]
+  priorityFlags     AccountPriorityFlag[]
+  tickets           Ticket[]      @relation("TicketCustomer")
+  operatedTickets   Ticket[]      @relation("TicketOperator")
+  ticketEvents      TicketEvent[]
+  appointments      Appointment[]
 }
 
-// ─── Customer (Telegram-primary) ─────────────────────────────────────────────
+// ─── OrgMembership (per-organization role for an Account) ────────────────────
 
-model Customer {
-  id             String        @id @default(uuid())
-  organizationId String?
-  organization   Organization? @relation(fields: [organizationId], references: [id])
+model OrgMembership {
+  id             String       @id @default(uuid())
+  accountId      String
+  account        Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branchId       String?
+  branch         Branch?      @relation("MembershipBranch", fields: [branchId], references: [id])
+  role           UserRole     @default(OFFICER)
+  isActive       Boolean      @default(true)
+  invitedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
-  telegramId       String?  @unique
-  telegramUsername String?
-  photoUrl         String?
+  @@unique([accountId, organizationId])
+  @@index([organizationId, branchId])
+}
 
-  phone           String?  @unique
-  email           String?
-  firstName       String
-  lastName        String?
-  profileComplete Boolean  @default(false)
+// ─── OTP verification ─────────────────────────────────────────────────────────
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model OtpVerification {
+  id          String     @id @default(uuid())
+  phone       String
+  purpose     OtpPurpose
+  codeHash    String
+  expiresAt   DateTime
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  consumedAt  DateTime?
+  requestIp   String?
+  createdAt   DateTime   @default(now())
 
-  tickets      Ticket[]
-  appointments Appointment[]
+  @@index([phone, purpose, consumedAt])
+}
+
+// ─── Trusted devices (OTP skip on known devices) ─────────────────────────────
+
+model TrustedDevice {
+  id              String    @id @default(uuid())
+  accountId       String
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deviceTokenHash String    @unique
+  label           String?
+  userAgent       String?
+  ip              String?
+  lastUsedAt      DateTime  @default(now())
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([accountId])
+}
+
+// ─── Priority / fairness flags ────────────────────────────────────────────────
+
+model PriorityFlag {
+  id             String   @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  weight         Int      @default(10)
+  color          String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  accountFlags AccountPriorityFlag[]
+  ticketFlags  TicketPriorityFlag[]
+
+  @@unique([organizationId, name])
+}
+
+model AccountPriorityFlag {
+  id         String       @id @default(uuid())
+  accountId  String
+  account    Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  flagId     String
+  flag       PriorityFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  assignedBy String?
+  assignedAt DateTime     @default(now())
+  expiresAt  DateTime?
+  notes      String?
+
+  @@unique([accountId, flagId])
+}
+
+model TicketPriorityFlag {
+  id         String       @id @default(uuid())
+  ticketId   String
+  ticket     Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  flagId     String
+  flag       PriorityFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  assignedBy String?
+  assignedAt DateTime     @default(now())
+  notes      String?
+
+  @@unique([ticketId, flagId])
 }
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
@@ -411,7 +511,7 @@ model Ticket {
   serviceId      String
   service        Service      @relation(fields: [serviceId], references: [id])
   customerId     String?
-  customer       Customer?    @relation(fields: [customerId], references: [id])
+  customer       Account?     @relation("TicketCustomer", fields: [customerId], references: [id])
 
   queueNumber String
   prefix      String @default("A")
@@ -422,7 +522,7 @@ model Ticket {
   currentCounterId String?
   currentCounter   Counter?      @relation("CurrentCounter", fields: [currentCounterId], references: [id])
   operatorId       String?
-  operator         User?         @relation("TicketOperator", fields: [operatorId], references: [id])
+  operator         Account?      @relation("TicketOperator", fields: [operatorId], references: [id])
 
   status        TicketStatus @default(CREATED)
   priority      Int          @default(0)
@@ -439,7 +539,8 @@ model Ticket {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  events TicketEvent[]
+  events        TicketEvent[]
+  priorityFlags TicketPriorityFlag[]
 
   @@index([branchId, status])
   @@index([organizationId, createdAt])
@@ -454,7 +555,7 @@ model TicketEvent {
   ticket    Ticket          @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   eventType TicketEventType
   actorId   String?
-  actor     User?           @relation(fields: [actorId], references: [id])
+  actor     Account?        @relation(fields: [actorId], references: [id])
 
   fromStatus TicketStatus?
   toStatus   TicketStatus?
@@ -476,7 +577,7 @@ model Appointment {
   serviceId      String
   service        Service           @relation(fields: [serviceId], references: [id])
   customerId     String?
-  customer       Customer?         @relation(fields: [customerId], references: [id])
+  customer       Account?          @relation(fields: [customerId], references: [id])
 
   scheduledAt DateTime
   duration    Int               @default(30)
