@@ -30,3 +30,5 @@ services:
         sync: false
       - key: TELEGRAM_BOT_USERNAME
         sync: false
+      - key: WORKER_SERVICE_TOKEN
+        sync: false
